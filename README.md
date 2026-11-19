@@ -16,7 +16,7 @@ CARE-BOT is an intelligent, stationary, voice-based home assistance system desig
 
 ---
 
-## 2. Project Architecture (Phase 2 Foundation)
+## 2. Project Architecture (Phase 3: User Management & Context Engine)
 
 ```
 CARE-BOT/
@@ -35,24 +35,43 @@ CARE-BOT/
 │   │   ├── deps.py         # Dependency injection providers (DB, settings)
 │   │   └── v1/
 │   │       ├── api.py      # Central v1 route aggregator
-│   │       └── health.py   # Diagnostics & database connectivity probe
+│   │       ├── health.py   # Diagnostics & database connectivity probe
+│   │       ├── users.py    # User profiles, preferences & NFC lookup endpoints
+│   │       └── conversations.py # Dialogue sessions, messages & context endpoints
+│   │
+│   ├── core/               # System Core
+│   │   ├── security.py     # PBKDF2 salted password hashing & verification
+│   │   └── context_engine.py # Context compilation & prompt synthesis for LLMs
 │   │
 │   ├── database/           # Persistence Layer
 │   │   ├── base.py         # SQLAlchemy 2.0 DeclarativeBase & TimestampMixin
-│   │   └── session.py      # Engine, sessionmaker, SQLite WAL mode pragmas
+│   │   ├── session.py      # Engine, sessionmaker, SQLite WAL mode pragmas
+│   │   └── models/
+│   │       ├── user.py     # User & UserPreferences SQLAlchemy models
+│   │       └── conversation.py # ConversationSession & Message models
 │   │
-│   ├── core/               # State machine & scheduling (Phase 3 & 6)
+│   ├── conversation/       # Conversation Context Module
+│   │   ├── schemas.py      # Session and Message Pydantic validation schemas
+│   │   └── service.py      # Session and message history business logic
+│   │
+│   ├── users/              # User Management Module
+│   │   ├── schemas.py      # User and Preferences Pydantic validation schemas
+│   │   └── service.py      # User registration & preferences business logic
+│   │
 │   ├── intelligence/       # Local LLM connector & decision engine (Phase 4)
 │   ├── language/           # Multilingual NLP & script normalizers (Phase 5)
 │   ├── safety/             # Deterministic emergency trie & guardrails (Phase 6)
 │   ├── services/           # External integrations (weather, adapters)
-│   ├── speech/             # Offline STT, TTS & audio streaming (Phase 7)
-│   └── users/              # User profiles & operating modes (Phase 3)
+│   └── speech/             # Offline STT, TTS & audio streaming (Phase 7)
 │
-└── tests/                  # Automated Pytest Suite
+└── tests/                  # Automated Pytest Suite (33 Unit & Integration Tests)
     ├── conftest.py         # In-memory SQLite fixtures & TestClient
     ├── test_config.py      # Settings and environment validation tests
     ├── test_database.py    # Database connection & transaction tests
+    ├── test_security.py    # Password hashing and salt verification tests
+    ├── test_users.py       # User CRUD, operating modes & NFC lookup tests
+    ├── test_conversations.py # Session persistence & cross-user isolation tests
+    ├── test_context_engine.py # Context synthesis & language prompt tests
     └── test_api/
         └── test_health.py  # Health check & diagnostic endpoint tests
 ```
@@ -61,7 +80,7 @@ CARE-BOT/
 
 ## 3. Quick Start & Setup Guide
 
-### 3.1 Activate Existing Environment
+### 3.1 Activate Environment
 The project uses Python 3.12 inside the local virtual environment:
 
 ```bash
@@ -75,11 +94,6 @@ Copy the template to create your local `.env`:
 ```bash
 cp .env.example .env
 ```
-
-Key configuration options in `.env`:
-* `DATABASE_URL`: Defaults to `sqlite:///./carebot.db`.
-* `ENVIRONMENT`: Set to `development`, `testing`, or `production`.
-* `DEBUG`: `true` to enable OpenAPI documentation (`/docs`).
 
 ### 3.3 Run the Development Server
 Launch the backend using Uvicorn:
@@ -95,55 +109,34 @@ The server will start at:
 
 ---
 
-## 4. Health Check Specification
+## 4. API Endpoints Overview
 
-The `GET /health` endpoint verifies system readiness and database connectivity:
+### User Management (`/api/v1/users`)
+* `POST /api/v1/users`: Register a new user profile with tailored defaults.
+* `GET /api/v1/users`: List registered users (supports `role` and `mode` filters).
+* `GET /api/v1/users/{user_id}`: Fetch user profile and preferences.
+* `PUT /api/v1/users/{user_id}`: Update user profile and switch operating mode.
+* `PUT /api/v1/users/{user_id}/preferences`: Update language, speech rate, and accessibility settings.
+* `DELETE /api/v1/users/{user_id}`: Delete user profile and cascade delete sessions.
+* `GET /api/v1/users/lookup/nfc/{nfc_card_id}`: Resolve user identity via hardware NFC card tap.
 
-```bash
-curl -s http://127.0.0.1:8000/health | jq
-```
-
-**Sample Response:**
-```json
-{
-  "status": "healthy",
-  "service": "CARE-BOT",
-  "version": "0.1.0",
-  "environment": "development",
-  "timestamp": "2026-11-19T03:57:38.123456+00:00",
-  "database": {
-    "status": "connected",
-    "engine": "sqlite",
-    "latency_ms": 0.42
-  },
-  "system": {
-    "python_version": "3.12.16",
-    "platform": "macOS-15.x-arm64-arm-64bit",
-    "machine": "arm64"
-  }
-}
-```
+### Conversation Context (`/api/v1/conversations`)
+* `POST /api/v1/conversations/users/{user_id}/sessions`: Create a dialogue session.
+* `GET /api/v1/conversations/users/{user_id}/sessions`: List sessions for a user.
+* `GET /api/v1/conversations/users/{user_id}/sessions/{session_id}`: Get session details (enforces ownership).
+* `PUT /api/v1/conversations/users/{user_id}/sessions/{session_id}`: Update FSM state or context metadata.
+* `POST /api/v1/conversations/users/{user_id}/sessions/{session_id}/messages`: Append user/assistant utterance.
+* `GET /api/v1/conversations/users/{user_id}/sessions/{session_id}/messages`: Retrieve chronological dialogue.
+* `GET /api/v1/conversations/users/{user_id}/context`: Compile structured context payload for local LLM inference.
 
 ---
 
 ## 5. Running Automated Tests
 
-Run the test suite using pytest:
-
-```bash
-pytest
-```
-
-Run with verbose output and test coverage:
+Run the complete test suite:
 
 ```bash
 pytest -v
 ```
 
----
-
-## 6. Git Branching Model & Contribution Guidelines
-
-* `main`: Protected production-ready code.
-* `feature/backend-foundation`: Current Phase 2 development branch.
-* **Strict Rule:** Never commit secrets, `.env` files, SQLite databases, or large AI weights (`*.gguf`, `*.onnx`) to Git.
+All 33 tests execute in under 0.3 seconds against an isolated in-memory SQLite database.
