@@ -1,5 +1,6 @@
 """Common dependency injection providers for FastAPI route handlers."""
 
+import hmac
 from typing import Generator, List, Optional
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -91,10 +92,14 @@ def verify_user_access(
 ) -> None:
     """Validate that the authenticated caller has authorization to access target_user_id's data.
 
-    Rules:
-    1. A user can always access their own data (`current_user.id == target_user_id`).
-    2. A CAREGIVER can manage and inspect resident profiles.
-    3. All other cross-user access attempts are rejected with 403 Forbidden.
+    Access Rules & Documented Architectural Boundaries:
+    1. A user can always access their own profile and conversation data (`current_user.id == target_user_id`).
+    2. A CAREGIVER possesses system-wide oversight to manage and inspect resident profiles.
+       LIMITATION NOTE: Explicit fine-grained caregiver-to-resident assignment (e.g. CaregiverResidentMapping)
+       is not yet implemented in Phase 3. Any user assigned the CAREGIVER role can currently access
+       all resident records in the household system. Fine-grained delegation is planned for production.
+    3. FAMILY_VIEWER accounts have read-only access (mutations are blocked on write endpoints).
+    4. All other cross-user access attempts (e.g. Resident A accessing Resident B) are rejected with 403 Forbidden.
     """
     if current_user.id == target_user_id:
         return
@@ -128,10 +133,15 @@ def verify_device_auth(
     """Authenticate physical hardware assistant requests (e.g. NFC tap, emergency button).
 
     Requires either:
-    1. A valid hardware pre-shared device key matching settings.DEVICE_API_KEY in X-Device-Key, OR
-    2. An authenticated CAREGIVER or RESIDENT session.
+    1. A valid hardware pre-shared device key matching settings.DEVICE_API_KEY in X-Device-Key,
+       verified using constant-time comparison (hmac.compare_digest), OR
+    2. An authenticated CAREGIVER or RESIDENT session bearer token.
     """
-    if x_device_key and x_device_key == settings.DEVICE_API_KEY:
+    if (
+        x_device_key
+        and settings.DEVICE_API_KEY
+        and hmac.compare_digest(x_device_key, settings.DEVICE_API_KEY)
+    ):
         return
 
     if current_user and current_user.role in (UserRole.RESIDENT, UserRole.CAREGIVER):

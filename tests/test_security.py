@@ -11,7 +11,7 @@ from app.core.security import (
     verify_password,
 )
 
-TEST_SECRET = "test-secret-key-12345"
+TEST_SECRET = "carebot-test-cryptographic-secret-key-32-chars!"
 
 
 def test_password_hashing_and_verification():
@@ -69,7 +69,7 @@ def test_tampered_token_rejected():
 
     # Decode with wrong secret
     with pytest.raises(InvalidTokenError):
-        decode_access_token(token, secret_key="wrong-secret-key")
+        decode_access_token(token, secret_key="wrong-secret-key-32-chars-long-padding!")
 
 
 def test_expired_token_rejected():
@@ -77,3 +77,53 @@ def test_expired_token_rejected():
     token = create_access_token({"sub": "1"}, secret_key=TEST_SECRET, expires_in_seconds=-10)
     with pytest.raises(ExpiredTokenError):
         decode_access_token(token, secret_key=TEST_SECRET)
+
+
+def test_secret_key_minimum_length_enforced():
+    """Verify creating or decoding tokens with short secrets (< 32 chars) raises ValueError."""
+    short_secret = "too-short-secret"
+    with pytest.raises(ValueError, match="at least 32 characters"):
+        create_access_token({"sub": "1"}, secret_key=short_secret)
+
+    valid_token = create_access_token({"sub": "1"}, secret_key=TEST_SECRET)
+    with pytest.raises(ValueError, match="at least 32 characters"):
+        decode_access_token(valid_token, secret_key=short_secret)
+
+
+def test_unsupported_algorithm_rejected():
+    """Verify algorithm confusion attacks (e.g. alg: none) are rejected."""
+    import base64
+    import json
+
+    # Create token with "alg": "none"
+    header = {"alg": "none", "typ": "JWT"}
+    payload = {"sub": "1", "exp": time.time() + 300, "iss": "carebot-auth", "aud": "carebot-client"}
+    h_b64 = base64.urlsafe_b64encode(json.dumps(header).encode()).decode().rstrip("=")
+    p_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    none_token = f"{h_b64}.{p_b64}."
+
+    with pytest.raises(InvalidTokenError, match="Unsupported algorithm"):
+        decode_access_token(none_token, secret_key=TEST_SECRET)
+
+
+def test_issuer_and_audience_verification():
+    """Verify issuer and audience claims are checked during decode."""
+    token = create_access_token(
+        {"sub": "1"},
+        secret_key=TEST_SECRET,
+        issuer="carebot-auth",
+        audience="carebot-client",
+    )
+
+    # Valid decode
+    decoded = decode_access_token(token, secret_key=TEST_SECRET)
+    assert decoded["iss"] == "carebot-auth"
+    assert decoded["aud"] == "carebot-client"
+
+    # Issuer mismatch
+    with pytest.raises(InvalidTokenError, match="issuer mismatch"):
+        decode_access_token(token, secret_key=TEST_SECRET, expected_issuer="foreign-issuer")
+
+    # Audience mismatch
+    with pytest.raises(InvalidTokenError, match="audience mismatch"):
+        decode_access_token(token, secret_key=TEST_SECRET, expected_audience="wrong-audience")

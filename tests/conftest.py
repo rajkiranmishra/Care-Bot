@@ -15,6 +15,8 @@ from app.main import app
 
 # In-memory SQLite engine configured for isolated unit testing
 TEST_DATABASE_URL = "sqlite:///:memory:"
+TEST_SECRET_KEY = "carebot-test-cryptographic-secret-key-32-chars!"
+TEST_DEVICE_KEY = "carebot-hardware-device-key-local-2026"
 
 test_engine = create_engine(
     TEST_DATABASE_URL,
@@ -28,7 +30,7 @@ def make_auth_headers(
     user_id: int,
     username: str = "testuser",
     role: str = "resident",
-    secret_key: str = "carebot-insecure-dev-secret-key-change-in-production-2026",
+    secret_key: str = TEST_SECRET_KEY,
     expires_in_seconds: int = 3600,
 ) -> Dict[str, str]:
     """Helper to generate standard Authorization: Bearer headers for tests."""
@@ -71,6 +73,8 @@ def custom_settings() -> Settings:
         ENVIRONMENT="testing",
         DEBUG=True,
         DATABASE_URL=TEST_DATABASE_URL,
+        SECRET_KEY=TEST_SECRET_KEY,
+        DEVICE_API_KEY=TEST_DEVICE_KEY,
     )
 
 

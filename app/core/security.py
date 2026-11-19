@@ -83,15 +83,32 @@ def _b64_decode(data_str: str) -> bytes:
     return base64.urlsafe_b64decode(data_str.encode("utf-8"))
 
 
+DEFAULT_ISSUER = "carebot-auth"
+DEFAULT_AUDIENCE = "carebot-client"
+MINIMUM_SECRET_KEY_LENGTH = 32
+
+
 def create_access_token(
     claims: Dict[str, Any],
     secret_key: str,
     expires_in_seconds: int = 3600,
+    issuer: str = DEFAULT_ISSUER,
+    audience: str = DEFAULT_AUDIENCE,
 ) -> str:
-    """Generate a cryptographically signed HMAC-SHA256 access token (RFC 7519 compliant)."""
+    """Generate a cryptographically signed HMAC-SHA256 access token (RFC 7519 compliant).
+
+    Validates secret key strength (min 32 chars) and includes standard iss, aud, iat, exp claims.
+    """
+    if not secret_key or len(secret_key) < MINIMUM_SECRET_KEY_LENGTH:
+        raise ValueError(
+            f"Signing secret key must be at least {MINIMUM_SECRET_KEY_LENGTH} characters long for HMAC-SHA256"
+        )
+
     now = int(time.time())
     payload = {
         **claims,
+        "iss": issuer,
+        "aud": audience,
         "iat": now,
         "exp": now + expires_in_seconds,
     }
@@ -107,14 +124,41 @@ def create_access_token(
     return f"{header_b64}.{payload_b64}.{sig_b64}"
 
 
-def decode_access_token(token: str, secret_key: str) -> Dict[str, Any]:
-    """Validate signature and expiration of an access token, returning the claims payload."""
+def decode_access_token(
+    token: str,
+    secret_key: str,
+    expected_issuer: Optional[str] = DEFAULT_ISSUER,
+    expected_audience: Optional[str] = DEFAULT_AUDIENCE,
+) -> Dict[str, Any]:
+    """Validate signature, algorithm, claims, and expiration of an access token."""
+    if not secret_key or len(secret_key) < MINIMUM_SECRET_KEY_LENGTH:
+        raise ValueError(
+            f"Verification secret key must be at least {MINIMUM_SECRET_KEY_LENGTH} characters long"
+        )
+
     try:
         parts = token.split(".")
         if len(parts) != 3:
             raise InvalidTokenError("Token structure must contain exactly three segments")
 
         header_b64, payload_b64, sig_b64 = parts
+
+        # 1. Parse and validate algorithm header (prevent algorithm confusion attacks)
+        try:
+            header = json.loads(_b64_decode(header_b64).decode("utf-8"))
+        except Exception as exc:
+            raise InvalidTokenError(f"Malformed token header: {exc}") from exc
+
+        if not isinstance(header, dict):
+            raise InvalidTokenError("Token header must be a JSON object")
+
+        if header.get("alg") != "HS256":
+            raise InvalidTokenError(f"Unsupported algorithm '{header.get('alg')}'; only HS256 is accepted")
+
+        if header.get("typ") != "JWT":
+            raise InvalidTokenError(f"Invalid token type '{header.get('typ')}'; expected 'JWT'")
+
+        # 2. Cryptographic signature check (constant-time verification)
         signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
         expected_sig = hmac.new(secret_key.encode("utf-8"), signing_input, hashlib.sha256).digest()
         actual_sig = _b64_decode(sig_b64)
@@ -122,15 +166,33 @@ def decode_access_token(token: str, secret_key: str) -> Dict[str, Any]:
         if not hmac.compare_digest(expected_sig, actual_sig):
             raise InvalidTokenError("Cryptographic signature mismatch")
 
+        # 3. Parse and validate claims
         payload = json.loads(_b64_decode(payload_b64).decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise InvalidTokenError("Token payload must be a JSON object")
 
-        # Verify expiration
+        now = time.time()
+
+        # Check expiration
         exp = payload.get("exp")
         if not exp or not isinstance(exp, (int, float)):
             raise InvalidTokenError("Token missing valid expiration claim")
 
-        if time.time() > exp:
+        if now > exp:
             raise ExpiredTokenError("Token has expired")
+
+        # Check clock skew / issued-at
+        iat = payload.get("iat")
+        if isinstance(iat, (int, float)) and iat > now + 60:
+            raise InvalidTokenError("Token issued in the future (exceeds clock skew allowance)")
+
+        # Verify issuer
+        if expected_issuer and payload.get("iss") != expected_issuer:
+            raise InvalidTokenError(f"Token issuer mismatch: expected '{expected_issuer}'")
+
+        # Verify audience
+        if expected_audience and payload.get("aud") != expected_audience:
+            raise InvalidTokenError(f"Token audience mismatch: expected '{expected_audience}'")
 
         return payload
     except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:

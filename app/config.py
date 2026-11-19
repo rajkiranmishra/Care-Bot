@@ -1,8 +1,8 @@
 """Application configuration management using Pydantic Settings."""
 
 from functools import lru_cache
-from typing import List
-from pydantic import Field
+from typing import List, Optional
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,17 +24,20 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = Field(default="INFO", description="Log level")
 
     # Cryptographic Security & Tokens
+    # In production, SECRET_KEY must be a cryptographically strong string of at least 32 characters.
     SECRET_KEY: str = Field(
-        default="carebot-insecure-dev-secret-key-change-in-production-2026",
-        description="Cryptographic secret key for signing tokens",
+        default="",
+        description="Cryptographic secret key for signing tokens. Must be configured via environment variable.",
     )
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
         default=60,
         description="Access token lifespan in minutes",
     )
-    DEVICE_API_KEY: str = Field(
-        default="carebot-hardware-device-key-local-2026",
-        description="Shared secret key authenticating physical smart-speaker hardware",
+    # Hardware device pre-shared key (e.g. NFC tap, emergency button).
+    # Has NO insecure default; must be explicitly configured in environment.
+    DEVICE_API_KEY: Optional[str] = Field(
+        default=None,
+        description="Shared secret key authenticating physical smart-speaker hardware. Must be configured in .env",
     )
 
     # Networking & Server
@@ -67,6 +70,30 @@ class Settings(BaseSettings):
     def is_sqlite(self) -> bool:
         """Check if active database URL targets SQLite."""
         return self.DATABASE_URL.startswith("sqlite")
+
+    @model_validator(mode="after")
+    def validate_security_configuration(self) -> "Settings":
+        """Enforce strict secret requirements in production and prevent insecure defaults."""
+        is_prod = self.ENVIRONMENT.lower() == "production"
+        if is_prod:
+            if (
+                not self.SECRET_KEY
+                or len(self.SECRET_KEY) < 32
+                or "dev" in self.SECRET_KEY.lower()
+                or "insecure" in self.SECRET_KEY.lower()
+            ):
+                raise ValueError(
+                    "In production, SECRET_KEY must be configured with a cryptographically secure string of at least 32 characters."
+                )
+            if not self.DEVICE_API_KEY or len(self.DEVICE_API_KEY) < 16 or "default" in self.DEVICE_API_KEY.lower():
+                raise ValueError(
+                    "In production, DEVICE_API_KEY must be explicitly set to a strong secret key (at least 16 characters)."
+                )
+        else:
+            # In development/testing, if SECRET_KEY was not provided in .env, supply a 32+ character dev key
+            if not self.SECRET_KEY:
+                self.SECRET_KEY = "carebot-ephemeral-dev-key-32-bytes-minimum-length!"
+        return self
 
 
 @lru_cache

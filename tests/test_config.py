@@ -29,3 +29,34 @@ def test_is_sqlite_property():
 
     pg_settings = Settings(DATABASE_URL="postgresql://user:pass@localhost/db")
     assert pg_settings.is_sqlite is False
+
+
+def test_device_api_key_has_no_insecure_default():
+    """Verify DEVICE_API_KEY defaults to None and has no insecure default in settings."""
+    settings = Settings()
+    assert settings.DEVICE_API_KEY is None
+
+
+def test_production_settings_rejects_missing_or_weak_secrets():
+    """Verify production environment strictly enforces strong secrets on boot."""
+    import pytest
+
+    # Missing SECRET_KEY in production
+    with pytest.raises(ValueError, match="SECRET_KEY must be configured"):
+        Settings(ENVIRONMENT="production", SECRET_KEY="", DEVICE_API_KEY="a-strong-device-key-16-bytes")
+
+    # Weak/insecure SECRET_KEY in production
+    with pytest.raises(ValueError, match="SECRET_KEY must be configured"):
+        Settings(
+            ENVIRONMENT="production",
+            SECRET_KEY="short-secret",
+            DEVICE_API_KEY="a-strong-device-key-16-bytes",
+        )
+
+    # Missing DEVICE_API_KEY in production
+    with pytest.raises(ValueError, match="DEVICE_API_KEY must be explicitly set"):
+        Settings(
+            ENVIRONMENT="production",
+            SECRET_KEY="a-very-long-cryptographically-strong-secret-key-32-chars!",
+            DEVICE_API_KEY=None,
+        )

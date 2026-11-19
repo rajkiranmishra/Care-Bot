@@ -65,12 +65,12 @@ CARE-BOT/
 │   ├── services/           # External integrations (weather, adapters)
 │   └── speech/             # Offline STT, TTS & audio streaming (Phase 7)
 │
-└── tests/                  # Automated Pytest Suite (44 Unit & Integration Tests)
+└── tests/                  # Automated Pytest Suite (50 Unit & Integration Tests)
     ├── conftest.py         # In-memory SQLite fixtures, TestClient & auth token helpers
-    ├── test_config.py      # Settings and environment validation tests
+    ├── test_config.py      # Settings, secret validation & environment tests
     ├── test_database.py    # Database connection & transaction tests
-    ├── test_security.py    # PBKDF2 600k hashing, salt & JWT token tests
-    ├── test_security_audit.py # RBAC, token auth, impersonation & NFC audit tests
+    ├── test_security.py    # PBKDF2 600k hashing, salt, JWT token & RFC claims tests
+    ├── test_security_audit.py # RBAC, token auth, privilege escalation & NFC audit tests
     ├── test_users.py       # User CRUD, operating modes & preferences tests
     ├── test_conversations.py # Session persistence & cross-user isolation tests
     ├── test_context_engine.py # Context synthesis & language prompt tests
@@ -145,4 +145,39 @@ Run the complete test suite:
 pytest -v
 ```
 
-All 44 unit and security integration tests execute in under 0.7 seconds against an isolated in-memory SQLite database.
+All 50 unit and security integration tests execute in under 0.8 seconds against an isolated in-memory SQLite database.
+
+---
+
+## 6. Security Model, Privilege Boundaries & Documented Limitations
+
+### 6.1 Confirmed Security Protections
+1. **Privilege Escalation Prevention:**
+   * Public self-registration (`POST /api/v1/users`) is strictly restricted to the `resident` role.
+   * Assigning elevated roles (`caregiver` or `family_viewer`) requires an authenticated `Caregiver` session or authorized device provisioning via `X-Device-Key`.
+2. **Assistant Message Impersonation Block:**
+   * Clients cannot inject synthetic assistant or system utterances into conversation history. External message posts are restricted to `role: "user"`.
+3. **Password Security:**
+   * Passwords hashed using PBKDF2-HMAC-SHA256 with 600,000 rounds (OWASP 2023) and 16-byte cryptographically secure random salt.
+   * Passwords, hashes, and salts are never returned in responses, serialized schemas, or logs.
+4. **Physical NFC Hardware Security:**
+   * NFC lookup endpoint requires either a valid hardware `X-Device-Key` (verified via `hmac.compare_digest`) or an authenticated session token.
+   * Possession of a card identifier alone never exposes private user records, returning only minimal non-PII identity info.
+   * `DEVICE_API_KEY` defaults to `None`; no insecure static default is present in settings.
+5. **Production Secret Enforcement:**
+   * In `ENVIRONMENT=production`, application startup fails fast if `SECRET_KEY` is under 32 characters or contains dev/insecure markers, or if `DEVICE_API_KEY` is not explicitly configured.
+
+### 6.2 Documented System Limitations (Phase 3)
+* **Caregiver-to-Resident Authorization Scope:**
+  * Any user assigned the `CAREGIVER` role currently possesses system-wide oversight across all residents in the local deployment.
+  * Explicit fine-grained caregiver-to-resident assignments (e.g. a `CaregiverResidentMapping` join model) are not yet implemented in Phase 3.
+  * Do not claim per-resident multi-tenant authorization until explicit relationship mappings are implemented.
+
+### 6.3 Recommendations for Production
+1. **JWT Library Migration:**
+   * The current pure-standard-library implementation (`hmac`, `hashlib`, `json`, `base64`) provides a lightweight, zero-dependency, auditable RFC 7519 HMAC-SHA256 implementation suitable for the initial prototype.
+   * For production, especially when adopting asymmetric signing (RS256/EdDSA) or integrating external OIDC identity providers, migrate to a dedicated, actively maintained library like `PyJWT` backed by `cryptography`.
+2. **Granular Caregiver Delegation:**
+   * Implement a `CaregiverResidentMapping` relationship table allowing household administrators to delegate access to specific caregivers or family viewers on a per-resident basis.
+3. **Hardware Keystore:**
+   * Store `DEVICE_API_KEY` in the host's secure enclave / keychain rather than plaintext environment files on hardware deployments.

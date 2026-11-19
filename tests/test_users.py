@@ -1,7 +1,7 @@
 """Automated tests for user profiles, operating modes, preferences, and validation."""
 
 from fastapi.testclient import TestClient
-from tests.conftest import make_auth_headers
+from tests.conftest import TEST_DEVICE_KEY, make_auth_headers
 
 
 def test_create_user_elderly_mode_success(client: TestClient):
@@ -99,8 +99,12 @@ def test_get_user_by_id_and_not_found(client: TestClient):
     assert get_res.status_code == 200
     assert get_res.json()["username"] == "fetch_user"
 
-    # Register an active Caregiver to query a non-existent ID -> 404
-    cg = client.post("/api/v1/users", json={"username": "cg_inspector", "full_name": "Caregiver", "role": "caregiver"}).json()
+    # Register an active Caregiver (via authorized device provisioning) to query a non-existent ID -> 404
+    cg = client.post(
+        "/api/v1/users",
+        json={"username": "cg_inspector", "full_name": "Caregiver", "role": "caregiver"},
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    ).json()
     cg_headers = make_auth_headers(user_id=cg["id"], username="cg_inspector", role="caregiver")
     not_found = client.get("/api/v1/users/99999", headers=cg_headers)
     assert not_found.status_code == 404
@@ -160,8 +164,12 @@ def test_lookup_user_by_nfc_card(client: TestClient):
 
 def test_delete_user_cascades(client: TestClient):
     """Verify deleting a user removes record and cascades."""
-    # Register an active Caregiver first so ID cannot collide
-    cg = client.post("/api/v1/users", json={"username": "cg_checker", "full_name": "Caregiver Checker", "role": "caregiver"}).json()
+    # Register an active Caregiver (via authorized device provisioning) so ID cannot collide
+    cg = client.post(
+        "/api/v1/users",
+        json={"username": "cg_checker", "full_name": "Caregiver Checker", "role": "caregiver"},
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    ).json()
     cg_headers = make_auth_headers(user_id=cg["id"], username="cg_checker", role="caregiver")
 
     user = client.post("/api/v1/users", json={"username": "delete_me", "full_name": "Delete Me"}).json()

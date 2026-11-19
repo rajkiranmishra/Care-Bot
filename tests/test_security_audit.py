@@ -1,7 +1,7 @@
 """Dedicated security audit tests verifying authentication, authorization, and boundaries."""
 
 from fastapi.testclient import TestClient
-from tests.conftest import make_auth_headers
+from tests.conftest import TEST_DEVICE_KEY, make_auth_headers
 
 
 def test_unauthenticated_requests_rejected(client: TestClient):
@@ -68,6 +68,7 @@ def test_caregiver_can_access_resident_profile(client: TestClient):
     caregiver = client.post(
         "/api/v1/users",
         json={"username": "carol_care", "full_name": "Carol", "role": "caregiver"},
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
     ).json()
 
     caregiver_headers = make_auth_headers(user_id=caregiver["id"], username="carol_care", role="caregiver")
@@ -93,6 +94,7 @@ def test_family_viewer_read_only_enforcement(client: TestClient):
     viewer = client.post(
         "/api/v1/users",
         json={"username": "dave_viewer", "full_name": "Dave", "role": "family_viewer"},
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
     ).json()
 
     viewer_headers = make_auth_headers(user_id=viewer["id"], username="dave_viewer", role="family_viewer")
@@ -222,3 +224,54 @@ def test_auth_login_and_me_endpoint(client: TestClient):
     me_res = client.get("/api/v1/auth/me", headers=headers)
     assert me_res.status_code == 200
     assert me_res.json()["username"] == "login_user"
+
+
+def test_public_registration_privilege_escalation_prevented(client: TestClient):
+    """Verify unauthenticated users cannot self-register with elevated roles (Caregiver, Family Viewer)."""
+    # Create an initial user so the DB is no longer in empty bootstrap mode
+    client.post("/api/v1/users", json={"username": "first_resident", "full_name": "First Resident"})
+
+    # 1. Unauthenticated attempt to register as Caregiver -> 403 Forbidden
+    hacker_cg = client.post(
+        "/api/v1/users",
+        json={"username": "fake_caregiver", "full_name": "Fake Caregiver", "role": "caregiver"},
+    )
+    assert hacker_cg.status_code == 403
+    assert "privilege escalation prevented" in hacker_cg.json()["detail"].lower()
+
+    # 2. Unauthenticated attempt to register as Family Viewer -> 403 Forbidden
+    hacker_fv = client.post(
+        "/api/v1/users",
+        json={"username": "fake_viewer", "full_name": "Fake Viewer", "role": "family_viewer"},
+    )
+    assert hacker_fv.status_code == 403
+    assert "privilege escalation prevented" in hacker_fv.json()["detail"].lower()
+
+    # 3. Normal public registration with default or explicit resident role -> 201 Created
+    normal_res = client.post(
+        "/api/v1/users",
+        json={"username": "normal_resident", "full_name": "Normal Resident"},
+    )
+    assert normal_res.status_code == 201
+    assert normal_res.json()["role"] == "resident"
+
+    # 4. Authenticated Caregiver can provision a new Caregiver -> 201 Created
+    # First provision caregiver via device key
+    cg_res = client.post(
+        "/api/v1/users",
+        json={"username": "legit_caregiver", "full_name": "Legit Caregiver", "role": "caregiver"},
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    )
+    assert cg_res.status_code == 201
+    cg_id = cg_res.json()["id"]
+
+    cg_auth = make_auth_headers(user_id=cg_id, username="legit_caregiver", role="caregiver")
+
+    # Now the authenticated Caregiver provisions a second Caregiver
+    second_cg = client.post(
+        "/api/v1/users",
+        json={"username": "caregiver_two", "full_name": "Second Caregiver", "role": "caregiver"},
+        headers=cg_auth,
+    )
+    assert second_cg.status_code == 201
+    assert second_cg.json()["role"] == "caregiver"

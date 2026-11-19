@@ -1,12 +1,16 @@
 """User management and preference REST endpoints with authentication and RBAC."""
 
+import hmac
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
     get_current_user,
     get_db,
+    get_optional_current_user,
+    get_settings,
+    Settings,
     verify_device_auth,
     verify_user_access,
 )
@@ -36,9 +40,39 @@ router = APIRouter(prefix="/users", tags=["User Management"])
 )
 def create_user(
     user_in: UserCreate,
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    x_device_key: Optional[str] = Header(None, alias="X-Device-Key"),
     db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> UserResponse:
-    """Create a new user with individualized operating mode and default preferences."""
+    """Create a new user with individualized operating mode and default preferences.
+
+    SECURITY RULE (Privilege Escalation Prevention):
+    Public self-registration is strictly restricted to the 'resident' role.
+    Elevated roles ('caregiver' and 'family_viewer') may ONLY be assigned by:
+    1. An authenticated user possessing the CAREGIVER role.
+    2. An authorized device administrator presenting a valid hardware X-Device-Key.
+    3. The initial bootstrap user if no users currently exist in the database.
+    """
+    if user_in.role != UserRole.RESIDENT:
+        is_caregiver = current_user is not None and current_user.role == UserRole.CAREGIVER
+        is_device_admin = bool(
+            x_device_key
+            and settings.DEVICE_API_KEY
+            and hmac.compare_digest(x_device_key, settings.DEVICE_API_KEY)
+        )
+        is_bootstrap = db.query(User).count() == 0
+
+        if not (is_caregiver or is_device_admin or is_bootstrap):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Privilege escalation prevented: Public self-registration is restricted to "
+                    f"role '{UserRole.RESIDENT.value}'. Elevated role '{user_in.role.value}' must "
+                    f"be provisioned by an authenticated Caregiver or authorized device provisioning."
+                ),
+            )
+
     try:
         user = UserService.create_user(db, user_in)
         return UserResponse.model_validate(user)
