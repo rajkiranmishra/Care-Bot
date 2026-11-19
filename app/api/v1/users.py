@@ -1,13 +1,19 @@
-"""User management and preference REST endpoints."""
+"""User management and preference REST endpoints with authentication and RBAC."""
 
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
-from app.database.models.user import OperatingMode, UserRole
+from app.api.deps import (
+    get_current_user,
+    get_db,
+    verify_device_auth,
+    verify_user_access,
+)
+from app.database.models.user import OperatingMode, SupportedLanguage, User, UserRole
 from app.users.schemas import (
     UserCreate,
+    UserNfcLookupResponse,
     UserPreferencesResponse,
     UserPreferencesUpdate,
     UserResponse,
@@ -43,7 +49,7 @@ def create_user(
 @router.get(
     "",
     response_model=List[UserResponse],
-    summary="List registered users",
+    summary="List registered users (Authenticated)",
 )
 def list_users(
     role: Optional[UserRole] = Query(default=None, description="Filter by user role"),
@@ -51,9 +57,10 @@ def list_users(
     active_only: bool = Query(default=True, description="Filter only active users"),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> List[UserResponse]:
-    """Retrieve a paginated list of users."""
+    """Retrieve registered users (accessible to authenticated users)."""
     users = UserService.list_users(
         db,
         role=role,
@@ -72,9 +79,11 @@ def list_users(
 )
 def get_user(
     user_id: int,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> UserResponse:
-    """Retrieve complete user profile and interaction preferences."""
+    """Retrieve complete user profile and preferences with ownership verification."""
+    verify_user_access(user_id, current_user)
     try:
         user = UserService.get_by_id(db, user_id)
         return UserResponse.model_validate(user)
@@ -90,9 +99,18 @@ def get_user(
 def update_user(
     user_id: int,
     user_update: UserUpdate,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> UserResponse:
-    """Update user's name, email, NFC card ID, or switch operating mode."""
+    """Update profile and switch operating mode. Family viewers are restricted."""
+    verify_user_access(user_id, current_user)
+
+    if current_user.role == UserRole.FAMILY_VIEWER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Family viewers have read-only access and cannot modify user profiles",
+        )
+
     try:
         user = UserService.update_user(db, user_id, user_update)
         return UserResponse.model_validate(user)
@@ -110,9 +128,18 @@ def update_user(
 def update_user_preferences(
     user_id: int,
     prefs_update: UserPreferencesUpdate,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> UserPreferencesResponse:
-    """Update language, speech speed, response style, or accessibility preferences."""
+    """Update interaction preferences. Family viewers are restricted."""
+    verify_user_access(user_id, current_user)
+
+    if current_user.role == UserRole.FAMILY_VIEWER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Family viewers have read-only access and cannot modify user preferences",
+        )
+
     try:
         prefs = UserService.update_preferences(db, user_id, prefs_update)
         return UserPreferencesResponse.model_validate(prefs)
@@ -127,9 +154,18 @@ def update_user_preferences(
 )
 def delete_user(
     user_id: int,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> None:
-    """Delete a user profile and all associated data."""
+    """Delete a user profile. Family viewers are restricted."""
+    verify_user_access(user_id, current_user)
+
+    if current_user.role == UserRole.FAMILY_VIEWER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Family viewers cannot delete user profiles",
+        )
+
     try:
         UserService.delete_user(db, user_id)
     except UserNotFoundError as exc:
@@ -138,16 +174,28 @@ def delete_user(
 
 @router.get(
     "/lookup/nfc/{nfc_card_id}",
-    response_model=UserResponse,
-    summary="Identify user by physical NFC/RFID card tap",
+    response_model=UserNfcLookupResponse,
+    summary="Identify user by physical NFC/RFID card tap (Device Authenticated)",
 )
 def lookup_user_by_nfc(
     nfc_card_id: str,
+    _: None = Depends(verify_device_auth),
     db: Session = Depends(get_db),
-) -> UserResponse:
-    """Hardware assistant integration: resolves a physical NFC card to a registered user."""
+) -> UserNfcLookupResponse:
+    """Hardware integration: resolves an NFC card tap to minimal non-sensitive user identity.
+
+    Protected by device pre-shared key (X-Device-Key) or authenticated session.
+    """
     try:
         user = UserService.get_by_nfc_card_id(db, nfc_card_id)
-        return UserResponse.model_validate(user)
+        pref_lang = user.preferences.preferred_language if user.preferences else SupportedLanguage.ENGLISH
+        return UserNfcLookupResponse(
+            user_id=user.id,
+            username=user.username,
+            full_name=user.full_name,
+            operating_mode=user.operating_mode,
+            preferred_language=pref_lang,
+            nfc_card_id=user.nfc_card_id or nfc_card_id,
+        )
     except UserNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))

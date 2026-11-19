@@ -1,13 +1,14 @@
 """Global pytest fixtures and test configuration."""
 
+from typing import Dict, Generator
 import pytest
-from typing import Generator
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.config import Settings, get_settings
+from app.core.security import create_access_token
 from app.database.base import Base
 from app.database.session import get_db
 from app.main import app
@@ -21,6 +22,22 @@ test_engine = create_engine(
     poolclass=StaticPool,
 )
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+
+
+def make_auth_headers(
+    user_id: int,
+    username: str = "testuser",
+    role: str = "resident",
+    secret_key: str = "carebot-insecure-dev-secret-key-change-in-production-2026",
+    expires_in_seconds: int = 3600,
+) -> Dict[str, str]:
+    """Helper to generate standard Authorization: Bearer headers for tests."""
+    token = create_access_token(
+        claims={"sub": str(user_id), "username": username, "role": role},
+        secret_key=secret_key,
+        expires_in_seconds=expires_in_seconds,
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 @pytest.fixture(scope="session", autouse=True)

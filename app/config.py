@@ -23,6 +23,20 @@ class Settings(BaseSettings):
     DEBUG: bool = Field(default=True, description="Enable debug diagnostics")
     LOG_LEVEL: str = Field(default="INFO", description="Log level")
 
+    # Cryptographic Security & Tokens
+    SECRET_KEY: str = Field(
+        default="carebot-insecure-dev-secret-key-change-in-production-2026",
+        description="Cryptographic secret key for signing tokens",
+    )
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
+        default=60,
+        description="Access token lifespan in minutes",
+    )
+    DEVICE_API_KEY: str = Field(
+        default="carebot-hardware-device-key-local-2026",
+        description="Shared secret key authenticating physical smart-speaker hardware",
+    )
+
     # Networking & Server
     HOST: str = Field(default="127.0.0.1", description="Server bind host")
     PORT: int = Field(default=8000, description="Server port")

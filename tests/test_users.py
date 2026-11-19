@@ -1,6 +1,7 @@
 """Automated tests for user profiles, operating modes, preferences, and validation."""
 
 from fastapi.testclient import TestClient
+from tests.conftest import make_auth_headers
 
 
 def test_create_user_elderly_mode_success(client: TestClient):
@@ -89,15 +90,19 @@ def test_invalid_username_format_rejected(client: TestClient):
 
 
 def test_get_user_by_id_and_not_found(client: TestClient):
-    """Verify fetching user by ID and 404 for non-existent users."""
+    """Verify fetching user by ID and 404 for non-existent users with valid auth."""
     res = client.post("/api/v1/users", json={"username": "fetch_user", "full_name": "Fetch Test"})
     user_id = res.json()["id"]
+    headers = make_auth_headers(user_id=user_id, username="fetch_user")
 
-    get_res = client.get(f"/api/v1/users/{user_id}")
+    get_res = client.get(f"/api/v1/users/{user_id}", headers=headers)
     assert get_res.status_code == 200
     assert get_res.json()["username"] == "fetch_user"
 
-    not_found = client.get("/api/v1/users/99999")
+    # Register an active Caregiver to query a non-existent ID -> 404
+    cg = client.post("/api/v1/users", json={"username": "cg_inspector", "full_name": "Caregiver", "role": "caregiver"}).json()
+    cg_headers = make_auth_headers(user_id=cg["id"], username="cg_inspector", role="caregiver")
+    not_found = client.get("/api/v1/users/99999", headers=cg_headers)
     assert not_found.status_code == 404
 
 
@@ -106,13 +111,16 @@ def test_update_operating_mode(client: TestClient):
     user1 = client.post("/api/v1/users", json={"username": "mode_switch_1", "full_name": "User 1", "operating_mode": "elderly_care"}).json()
     user2 = client.post("/api/v1/users", json={"username": "mode_switch_2", "full_name": "User 2", "operating_mode": "elderly_care"}).json()
 
+    headers1 = make_auth_headers(user_id=user1["id"], username="mode_switch_1")
+    headers2 = make_auth_headers(user_id=user2["id"], username="mode_switch_2")
+
     # Switch user 1 to working professional
-    update_res = client.put(f"/api/v1/users/{user1['id']}", json={"operating_mode": "working_professional"})
+    update_res = client.put(f"/api/v1/users/{user1['id']}", json={"operating_mode": "working_professional"}, headers=headers1)
     assert update_res.status_code == 200
     assert update_res.json()["operating_mode"] == "working_professional"
 
     # Verify user 2 remains elderly care (individualized mode configuration)
-    check_user2 = client.get(f"/api/v1/users/{user2['id']}").json()
+    check_user2 = client.get(f"/api/v1/users/{user2['id']}", headers=headers2).json()
     assert check_user2["operating_mode"] == "elderly_care"
 
 
@@ -120,6 +128,7 @@ def test_update_user_preferences(client: TestClient):
     """Verify updating language and response style preferences."""
     user = client.post("/api/v1/users", json={"username": "pref_user", "full_name": "Preference User"}).json()
     user_id = user["id"]
+    headers = make_auth_headers(user_id=user_id, username="pref_user")
 
     update_payload = {
         "preferred_language": "bn",
@@ -127,7 +136,7 @@ def test_update_user_preferences(client: TestClient):
         "spoken_speed": 0.85,
         "high_contrast_dashboard": True,
     }
-    pref_res = client.put(f"/api/v1/users/{user_id}/preferences", json=update_payload)
+    pref_res = client.put(f"/api/v1/users/{user_id}/preferences", json=update_payload, headers=headers)
     assert pref_res.status_code == 200
     data = pref_res.json()
     assert data["preferred_language"] == "bn"
@@ -137,24 +146,31 @@ def test_update_user_preferences(client: TestClient):
 
 
 def test_lookup_user_by_nfc_card(client: TestClient):
-    """Verify resolving user identity via physical NFC card ID."""
+    """Verify resolving user identity via physical NFC card ID with device key."""
     client.post("/api/v1/users", json={"username": "nfc_resident", "full_name": "NFC Resident", "nfc_card_id": "RFID-HEX-1234"})
+    device_headers = {"X-Device-Key": "carebot-hardware-device-key-local-2026"}
 
-    found = client.get("/api/v1/users/lookup/nfc/RFID-HEX-1234")
+    found = client.get("/api/v1/users/lookup/nfc/RFID-HEX-1234", headers=device_headers)
     assert found.status_code == 200
     assert found.json()["username"] == "nfc_resident"
 
-    missing = client.get("/api/v1/users/lookup/nfc/UNKNOWN-RFID")
+    missing = client.get("/api/v1/users/lookup/nfc/UNKNOWN-RFID", headers=device_headers)
     assert missing.status_code == 404
 
 
 def test_delete_user_cascades(client: TestClient):
     """Verify deleting a user removes record and cascades."""
+    # Register an active Caregiver first so ID cannot collide
+    cg = client.post("/api/v1/users", json={"username": "cg_checker", "full_name": "Caregiver Checker", "role": "caregiver"}).json()
+    cg_headers = make_auth_headers(user_id=cg["id"], username="cg_checker", role="caregiver")
+
     user = client.post("/api/v1/users", json={"username": "delete_me", "full_name": "Delete Me"}).json()
     user_id = user["id"]
+    headers = make_auth_headers(user_id=user_id, username="delete_me")
 
-    del_res = client.delete(f"/api/v1/users/{user_id}")
+    del_res = client.delete(f"/api/v1/users/{user_id}", headers=headers)
     assert del_res.status_code == 204
 
-    get_res = client.get(f"/api/v1/users/{user_id}")
+    # Caregiver queries deleted user_id -> 404 Not Found
+    get_res = client.get(f"/api/v1/users/{user_id}", headers=cg_headers)
     assert get_res.status_code == 404

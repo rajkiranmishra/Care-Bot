@@ -76,7 +76,6 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     """Schema for registering a new user."""
     password: Optional[str] = Field(default=None, min_length=6, description="Optional password for dashboard login")
-    # Optional initial preference overrides
     initial_language: Optional[SupportedLanguage] = None
     initial_response_style: Optional[ResponseStyle] = None
 
@@ -108,5 +107,17 @@ class UserResponse(UserBase):
     created_at: datetime
     updated_at: datetime
     preferences: Optional[UserPreferencesResponse] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UserNfcLookupResponse(BaseModel):
+    """Privacy-safe minimal identity representation for hardware NFC readers."""
+    user_id: int
+    username: str
+    full_name: str
+    operating_mode: OperatingMode
+    preferred_language: SupportedLanguage
+    nfc_card_id: str
 
     model_config = ConfigDict(from_attributes=True)

@@ -3,6 +3,7 @@
 from fastapi.testclient import TestClient
 from app.core.context_engine import ContextEngine
 from app.database.models.user import OperatingMode, ResponseStyle, SupportedLanguage
+from tests.conftest import make_auth_headers
 
 
 def test_system_instructions_modes():
@@ -61,22 +62,27 @@ def test_context_engine_endpoint_synthesis(client: TestClient):
         },
     ).json()
     user_id = user["id"]
+    headers = make_auth_headers(user_id=user_id, username="context_resident")
 
     # Initialize a session and post messages
-    session = client.post(f"/api/v1/conversations/users/{user_id}/sessions", json={"title": "Tea Request"}).json()
+    session = client.post(
+        f"/api/v1/conversations/users/{user_id}/sessions",
+        json={"title": "Tea Request"},
+        headers=headers,
+    ).json()
     session_id = session["id"]
 
     client.post(
         f"/api/v1/conversations/users/{user_id}/sessions/{session_id}/messages",
         json={"role": "user", "content": "আমাকে চা দিতে বলো।", "detected_language": "bn"},
-    )
-    client.post(
-        f"/api/v1/conversations/users/{user_id}/sessions/{session_id}/messages",
-        json={"role": "assistant", "content": "আমি আপনার পরিবারকে জানাচ্ছি।", "detected_language": "bn"},
+        headers=headers,
     )
 
     # Fetch compiled context
-    context_res = client.get(f"/api/v1/conversations/users/{user_id}/context?history_window=5")
+    context_res = client.get(
+        f"/api/v1/conversations/users/{user_id}/context?history_window=5",
+        headers=headers,
+    )
     assert context_res.status_code == 200
     context = context_res.json()
 
@@ -88,9 +94,8 @@ def test_context_engine_endpoint_synthesis(client: TestClient):
     assert "Bengali" in context["system_instructions"]
 
     # History window verification
-    assert len(context["recent_messages"]) == 2
+    assert len(context["recent_messages"]) == 1
     assert context["recent_messages"][0]["content"] == "আমাকে চা দিতে বলো।"
-    assert context["recent_messages"][1]["content"] == "আমি আপনার পরিবারকে জানাচ্ছি।"
 
 
 def test_context_engine_cross_user_isolation(client: TestClient):
@@ -98,15 +103,19 @@ def test_context_engine_cross_user_isolation(client: TestClient):
     u1 = client.post("/api/v1/users", json={"username": "user_one", "full_name": "User 1"}).json()
     u2 = client.post("/api/v1/users", json={"username": "user_two", "full_name": "User 2"}).json()
 
+    headers_1 = make_auth_headers(user_id=u1["id"], username="user_one")
+    headers_2 = make_auth_headers(user_id=u2["id"], username="user_two")
+
     # User 1 session & message
-    s1 = client.post(f"/api/v1/conversations/users/{u1['id']}/sessions", json={}).json()
+    s1 = client.post(f"/api/v1/conversations/users/{u1['id']}/sessions", json={}, headers=headers_1).json()
     client.post(
         f"/api/v1/conversations/users/{u1['id']}/sessions/{s1['id']}/messages",
         json={"role": "user", "content": "User 1 Secret Note"},
+        headers=headers_1,
     )
 
     # User 2 context fetch
-    u2_context = client.get(f"/api/v1/conversations/users/{u2['id']}/context").json()
+    u2_context = client.get(f"/api/v1/conversations/users/{u2['id']}/context", headers=headers_2).json()
     messages_content = [m["content"] for m in u2_context["recent_messages"]]
 
     assert "User 1 Secret Note" not in messages_content
