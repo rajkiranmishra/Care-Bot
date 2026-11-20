@@ -17,6 +17,7 @@ from app.main import app
 TEST_DATABASE_URL = "sqlite:///:memory:"
 TEST_SECRET_KEY = "carebot-test-cryptographic-secret-key-32-chars!"
 TEST_DEVICE_KEY = "carebot-hardware-device-key-local-2026"
+TEST_BOOTSTRAP_TOKEN = "carebot-test-bootstrap-secret-token-32chars!"
 
 test_engine = create_engine(
     TEST_DATABASE_URL,
@@ -75,6 +76,7 @@ def custom_settings() -> Settings:
         DATABASE_URL=TEST_DATABASE_URL,
         SECRET_KEY=TEST_SECRET_KEY,
         DEVICE_API_KEY=TEST_DEVICE_KEY,
+        BOOTSTRAP_TOKEN=TEST_BOOTSTRAP_TOKEN,
     )
 
 

@@ -1,6 +1,7 @@
 """User management and preference REST endpoints with authentication and RBAC."""
 
 import hmac
+import threading
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -31,6 +32,9 @@ from app.users.service import (
 
 router = APIRouter(prefix="/users", tags=["User Management"])
 
+# Process-level concurrency lock ensuring single-use atomic administrator bootstrap
+_bootstrap_lock = threading.Lock()
+
 
 @router.post(
     "",
@@ -42,17 +46,19 @@ def create_user(
     user_in: UserCreate,
     current_user: Optional[User] = Depends(get_optional_current_user),
     x_device_key: Optional[str] = Header(None, alias="X-Device-Key"),
+    x_bootstrap_token: Optional[str] = Header(None, alias="X-Bootstrap-Token"),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> UserResponse:
     """Create a new user with individualized operating mode and default preferences.
 
-    SECURITY RULE (Privilege Escalation Prevention):
+    SECURITY RULE (Privilege Escalation Prevention & Bootstrap Security):
     Public self-registration is strictly restricted to the 'resident' role.
     Elevated roles ('caregiver' and 'family_viewer') may ONLY be assigned by:
     1. An authenticated user possessing the CAREGIVER role.
     2. An authorized device administrator presenting a valid hardware X-Device-Key.
-    3. The initial bootstrap user if no users currently exist in the database.
+    3. The initial administrator bootstrap flow presenting a valid X-Bootstrap-Token
+       BEFORE any administrator account exists in the system.
     """
     if user_in.role != UserRole.RESIDENT:
         is_caregiver = current_user is not None and current_user.role == UserRole.CAREGIVER
@@ -61,15 +67,47 @@ def create_user(
             and settings.DEVICE_API_KEY
             and hmac.compare_digest(x_device_key, settings.DEVICE_API_KEY)
         )
-        is_bootstrap = db.query(User).count() == 0
+        is_bootstrap_attempt = x_bootstrap_token is not None
 
-        if not (is_caregiver or is_device_admin or is_bootstrap):
+        if is_caregiver or is_device_admin:
+            # Authorized ongoing administrative provisioning
+            pass
+        elif is_bootstrap_attempt:
+            # Validate server configuration for initial bootstrap
+            if not settings.BOOTSTRAP_TOKEN:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Initial administrator bootstrap is disabled on this server.",
+                )
+            if not hmac.compare_digest(x_bootstrap_token, settings.BOOTSTRAP_TOKEN):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid bootstrap token.",
+                )
+
+            # Atomic concurrency protection: ensure only one administrator can be bootstrapped
+            with _bootstrap_lock:
+                db.expire_all()
+                has_caregiver = (
+                    db.query(User).filter(User.role == UserRole.CAREGIVER).first() is not None
+                )
+                if has_caregiver:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Initial administrator bootstrap is disabled: An administrator account has already been provisioned.",
+                    )
+                try:
+                    user = UserService.create_user(db, user_in)
+                    return UserResponse.model_validate(user)
+                except UserConflictError as exc:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+        else:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
                     f"Privilege escalation prevented: Public self-registration is restricted to "
                     f"role '{UserRole.RESIDENT.value}'. Elevated role '{user_in.role.value}' must "
-                    f"be provisioned by an authenticated Caregiver or authorized device provisioning."
+                    f"be provisioned by an authenticated Caregiver or authorized bootstrap."
                 ),
             )
 

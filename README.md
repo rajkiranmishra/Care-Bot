@@ -65,12 +65,12 @@ CARE-BOT/
 │   ├── services/           # External integrations (weather, adapters)
 │   └── speech/             # Offline STT, TTS & audio streaming (Phase 7)
 │
-└── tests/                  # Automated Pytest Suite (50 Unit & Integration Tests)
+└── tests/                  # Automated Pytest Suite (55 Unit & Integration Tests)
     ├── conftest.py         # In-memory SQLite fixtures, TestClient & auth token helpers
     ├── test_config.py      # Settings, secret validation & environment tests
     ├── test_database.py    # Database connection & transaction tests
     ├── test_security.py    # PBKDF2 600k hashing, salt, JWT token & RFC claims tests
-    ├── test_security_audit.py # RBAC, token auth, privilege escalation & NFC audit tests
+    ├── test_security_audit.py # RBAC, token auth, privilege escalation, bootstrap & NFC audit tests
     ├── test_users.py       # User CRUD, operating modes & preferences tests
     ├── test_conversations.py # Session persistence & cross-user isolation tests
     ├── test_context_engine.py # Context synthesis & language prompt tests
@@ -145,16 +145,20 @@ Run the complete test suite:
 pytest -v
 ```
 
-All 50 unit and security integration tests execute in under 0.8 seconds against an isolated in-memory SQLite database.
+All 55 unit and security integration tests execute in under 0.8 seconds against an isolated in-memory SQLite database.
 
 ---
 
 ## 6. Security Model, Privilege Boundaries & Documented Limitations
 
 ### 6.1 Confirmed Security Protections
-1. **Privilege Escalation Prevention:**
-   * Public self-registration (`POST /api/v1/users`) is strictly restricted to the `resident` role.
-   * Assigning elevated roles (`caregiver` or `family_viewer`) requires an authenticated `Caregiver` session or authorized device provisioning via `X-Device-Key`.
+1. **Privilege Escalation Prevention & Bootstrap Security:**
+   * Public self-registration (`POST /api/v1/users`) is strictly restricted to the `resident` role. An unauthenticated client cannot claim administrator privileges merely because the database is empty.
+   * Initial administrator provisioning requires an explicit, cryptographically secure one-time secret (`X-Bootstrap-Token`) matching `BOOTSTRAP_TOKEN`.
+   * The bootstrap mechanism is single-use and permanently disabled once the first administrator account is created.
+   * Concurrent registration attempts are serialized with an atomic process lock (`_bootstrap_lock`), ensuring race conditions cannot create multiple initial administrators.
+   * Ongoing assignment of elevated roles requires an authenticated `Caregiver` session or authorized device provisioning via `X-Device-Key`.
+   * The bootstrap secret is never logged, serialized in API models, or committed to Git.
 2. **Assistant Message Impersonation Block:**
    * Clients cannot inject synthetic assistant or system utterances into conversation history. External message posts are restricted to `role: "user"`.
 3. **Password Security:**
@@ -165,7 +169,7 @@ All 50 unit and security integration tests execute in under 0.8 seconds against 
    * Possession of a card identifier alone never exposes private user records, returning only minimal non-PII identity info.
    * `DEVICE_API_KEY` defaults to `None`; no insecure static default is present in settings.
 5. **Production Secret Enforcement:**
-   * In `ENVIRONMENT=production`, application startup fails fast if `SECRET_KEY` is under 32 characters or contains dev/insecure markers, or if `DEVICE_API_KEY` is not explicitly configured.
+   * In `ENVIRONMENT=production`, application startup fails fast if `SECRET_KEY` is under 32 characters or contains dev/insecure markers, if `DEVICE_API_KEY` is not explicitly configured, or if `BOOTSTRAP_TOKEN` is weak.
 
 ### 6.2 Documented System Limitations (Phase 3)
 * **Caregiver-to-Resident Authorization Scope:**

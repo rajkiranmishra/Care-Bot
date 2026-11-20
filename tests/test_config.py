@@ -32,9 +32,10 @@ def test_is_sqlite_property():
 
 
 def test_device_api_key_has_no_insecure_default():
-    """Verify DEVICE_API_KEY defaults to None and has no insecure default in settings."""
+    """Verify DEVICE_API_KEY and BOOTSTRAP_TOKEN default to None and have no insecure defaults."""
     settings = Settings()
     assert settings.DEVICE_API_KEY is None
+    assert settings.BOOTSTRAP_TOKEN is None
 
 
 def test_production_settings_rejects_missing_or_weak_secrets():
@@ -59,4 +60,13 @@ def test_production_settings_rejects_missing_or_weak_secrets():
             ENVIRONMENT="production",
             SECRET_KEY="a-very-long-cryptographically-strong-secret-key-32-chars!",
             DEVICE_API_KEY=None,
+        )
+
+    # Weak BOOTSTRAP_TOKEN in production
+    with pytest.raises(ValueError, match="BOOTSTRAP_TOKEN must be configured with a strong secret"):
+        Settings(
+            ENVIRONMENT="production",
+            SECRET_KEY="a-very-long-cryptographically-strong-secret-key-32-chars!",
+            DEVICE_API_KEY="a-strong-device-key-16-bytes",
+            BOOTSTRAP_TOKEN="short-dev-token",
         )

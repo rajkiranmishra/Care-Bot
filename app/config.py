@@ -39,6 +39,12 @@ class Settings(BaseSettings):
         default=None,
         description="Shared secret key authenticating physical smart-speaker hardware. Must be configured in .env",
     )
+    # One-time bootstrap secret token for initial administrator / caregiver provisioning.
+    # Passed via X-Bootstrap-Token header. Disabled once an administrator account exists.
+    BOOTSTRAP_TOKEN: Optional[str] = Field(
+        default=None,
+        description="One-time secret token for initial administrator provisioning. Must be configured in .env",
+    )
 
     # Networking & Server
     HOST: str = Field(default="127.0.0.1", description="Server bind host")
@@ -89,10 +95,18 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "In production, DEVICE_API_KEY must be explicitly set to a strong secret key (at least 16 characters)."
                 )
+            if self.BOOTSTRAP_TOKEN and (
+                len(self.BOOTSTRAP_TOKEN) < 32 or "dev" in self.BOOTSTRAP_TOKEN.lower() or "default" in self.BOOTSTRAP_TOKEN.lower()
+            ):
+                raise ValueError(
+                    "In production, BOOTSTRAP_TOKEN must be configured with a strong secret of at least 32 characters."
+                )
         else:
             # In development/testing, if SECRET_KEY was not provided in .env, supply a 32+ character dev key
             if not self.SECRET_KEY:
                 self.SECRET_KEY = "carebot-ephemeral-dev-key-32-bytes-minimum-length!"
+            if self.BOOTSTRAP_TOKEN and len(self.BOOTSTRAP_TOKEN) < 16:
+                raise ValueError("BOOTSTRAP_TOKEN, if configured, must be at least 16 characters long.")
         return self
 
 

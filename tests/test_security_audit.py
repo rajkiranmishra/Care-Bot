@@ -1,7 +1,11 @@
 """Dedicated security audit tests verifying authentication, authorization, and boundaries."""
 
+import concurrent.futures
 from fastapi.testclient import TestClient
-from tests.conftest import TEST_DEVICE_KEY, make_auth_headers
+from sqlalchemy.orm import Session
+
+from app.database.models.user import User, UserRole
+from tests.conftest import TEST_BOOTSTRAP_TOKEN, TEST_DEVICE_KEY, make_auth_headers
 
 
 def test_unauthenticated_requests_rejected(client: TestClient):
@@ -275,3 +279,110 @@ def test_public_registration_privilege_escalation_prevented(client: TestClient):
     )
     assert second_cg.status_code == 201
     assert second_cg.json()["role"] == "caregiver"
+
+
+def test_bootstrap_missing_secret_rejected(client: TestClient, db_session: Session):
+    """Verify that an unauthenticated client cannot claim caregiver role when no bootstrap secret is provided."""
+    # Ensure no caregivers exist
+    db_session.query(User).filter(User.role == UserRole.CAREGIVER).delete()
+    db_session.commit()
+
+    res = client.post(
+        "/api/v1/users",
+        json={"username": "unauth_claimant", "full_name": "Unauth Claimant", "role": "caregiver"},
+    )
+    assert res.status_code == 403
+    assert "privilege escalation prevented" in res.json()["detail"].lower()
+
+
+def test_bootstrap_incorrect_secret_rejected(client: TestClient, db_session: Session):
+    """Verify that providing an incorrect bootstrap token is rejected with 401 Unauthorized."""
+    # Ensure no caregivers exist
+    db_session.query(User).filter(User.role == UserRole.CAREGIVER).delete()
+    db_session.commit()
+
+    res = client.post(
+        "/api/v1/users",
+        json={"username": "bad_token_user", "full_name": "Bad Token", "role": "caregiver"},
+        headers={"X-Bootstrap-Token": "incorrect-bootstrap-token-value"},
+    )
+    assert res.status_code == 401
+    assert "invalid bootstrap token" in res.json()["detail"].lower()
+
+
+def test_bootstrap_successful_initial_provisioning(client: TestClient, db_session: Session):
+    """Verify that the initial administrator can be successfully provisioned using the valid bootstrap token."""
+    # Ensure no caregivers exist
+    db_session.query(User).filter(User.role == UserRole.CAREGIVER).delete()
+    db_session.commit()
+
+    res = client.post(
+        "/api/v1/users",
+        json={"username": "root_admin", "full_name": "Root Administrator", "role": "caregiver"},
+        headers={"X-Bootstrap-Token": TEST_BOOTSTRAP_TOKEN},
+    )
+    assert res.status_code == 201
+    data = res.json()
+    assert data["username"] == "root_admin"
+    assert data["role"] == "caregiver"
+
+
+def test_bootstrap_reuse_after_provisioning_rejected(client: TestClient, db_session: Session):
+    """Verify that the bootstrap token cannot be reused once an administrator account exists."""
+    # First, provision the administrator
+    db_session.query(User).filter(User.role == UserRole.CAREGIVER).delete()
+    db_session.commit()
+
+    first_res = client.post(
+        "/api/v1/users",
+        json={"username": "initial_admin", "full_name": "Initial Admin", "role": "caregiver"},
+        headers={"X-Bootstrap-Token": TEST_BOOTSTRAP_TOKEN},
+    )
+    assert first_res.status_code == 201
+
+    # Second attempt using the same bootstrap token MUST be rejected
+    second_res = client.post(
+        "/api/v1/users",
+        json={"username": "second_bootstrap_attempt", "full_name": "Imposter", "role": "caregiver"},
+        headers={"X-Bootstrap-Token": TEST_BOOTSTRAP_TOKEN},
+    )
+    assert second_res.status_code == 403
+    assert "already been provisioned" in second_res.json()["detail"].lower()
+
+
+def test_bootstrap_concurrent_first_admin_provisioning(client: TestClient, db_session: Session):
+    """Verify that concurrent requests with the bootstrap token cannot create multiple administrators."""
+    db_session.query(User).filter(User.role == UserRole.CAREGIVER).delete()
+    db_session.commit()
+
+    results = []
+
+    def attempt_bootstrap(i: int):
+        return client.post(
+            "/api/v1/users",
+            json={
+                "username": f"concurrent_admin_{i}",
+                "full_name": f"Concurrent Admin {i}",
+                "role": "caregiver",
+            },
+            headers={"X-Bootstrap-Token": TEST_BOOTSTRAP_TOKEN},
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(attempt_bootstrap, i) for i in range(5)]
+        for f in concurrent.futures.as_completed(futures):
+            results.append(f.result())
+
+    status_codes = [r.status_code for r in results]
+    # Exactly one request must succeed with 201 Created
+    assert status_codes.count(201) == 1
+    # All other concurrent requests must be rejected with 403 Forbidden
+    assert status_codes.count(403) == 4
+
+    # Verify in database that only one caregiver was created from the concurrent set
+    caregivers = (
+        db_session.query(User)
+        .filter(User.username.like("concurrent_admin_%"))
+        .all()
+    )
+    assert len(caregivers) == 1
