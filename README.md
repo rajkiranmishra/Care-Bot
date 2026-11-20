@@ -65,12 +65,12 @@ CARE-BOT/
 │   ├── services/           # External integrations (weather, adapters)
 │   └── speech/             # Offline STT, TTS & audio streaming (Phase 7)
 │
-└── tests/                  # Automated Pytest Suite (56 Unit & Integration Tests)
+└── tests/                  # Automated Pytest Suite (58 Unit & Integration Tests)
     ├── conftest.py         # In-memory SQLite fixtures, TestClient & auth token helpers
     ├── test_config.py      # Settings, secret validation & environment tests
     ├── test_database.py    # Database connection & transaction tests
     ├── test_security.py    # PBKDF2 600k hashing, salt, JWT token & RFC claims tests
-    ├── test_security_audit.py # RBAC, token auth, multi-process bootstrap & NFC audit tests
+    ├── test_security_audit.py # RBAC, token auth, multi-process bootstrap, legacy DB & NFC audit tests
     ├── test_users.py       # User CRUD, operating modes & preferences tests
     ├── test_conversations.py # Session persistence & cross-user isolation tests
     ├── test_context_engine.py # Context synthesis & language prompt tests
@@ -145,7 +145,7 @@ Run the complete test suite:
 pytest -v
 ```
 
-All 56 unit and security integration tests execute in under 0.8 seconds against an isolated in-memory SQLite database.
+All 58 unit and security integration tests execute in under 0.8 seconds against an isolated in-memory SQLite database.
 
 ---
 
@@ -156,6 +156,8 @@ All 56 unit and security integration tests execute in under 0.8 seconds against 
    * Public self-registration (`POST /api/v1/users`) is strictly restricted to the `resident` role. An unauthenticated client cannot claim administrator privileges merely because the database is empty.
    * Initial administrator provisioning requires an explicit, cryptographically secure one-time secret (`X-Bootstrap-Token`) matching `BOOTSTRAP_TOKEN`.
    * **Multi-Process Atomic Protection:** Both in-process mutex locking (`_bootstrap_lock`) and database-level primary key uniqueness (`SystemBootstrap` with `id=1`) enforce that even with multiple Uvicorn workers (`--workers 4`) or multiple distributed instances, only a single initial administrator can ever commit.
+   * **Transactional Integrity:** `SystemBootstrap(id=1)` insertion, user creation, and preferences initialization execute within the same database transaction (`auto_commit=False`). If user creation fails (e.g. duplicate conflict or invalid field), the bootstrap marker rolls back completely.
+   * **Legacy Database Protection:** If upgrading an existing database where a caregiver already exists, the endpoint checks both `User.role == CAREGIVER` AND `SystemBootstrap.id == 1`. An empty `SystemBootstrap` table on an existing deployment cannot be exploited to bootstrap another administrator.
    * The bootstrap mechanism is permanently disabled once the first administrator account is created.
    * Ongoing assignment of elevated roles requires an authenticated `Caregiver` session or authorized device provisioning via `X-Device-Key`.
    * The bootstrap secret is never logged, serialized in API models, or committed to Git.
@@ -202,7 +204,16 @@ All 56 unit and security integration tests execute in under 0.8 seconds against 
   * Explicit fine-grained caregiver-to-resident assignments (e.g. a `CaregiverResidentMapping` join model) are not yet implemented in Phase 3.
   * Do not claim per-resident multi-tenant authorization until explicit relationship mappings are implemented.
 
-### 6.4 Recommendations for Production
+### 6.4 Database Compatibility & Concurrency Boundaries
+* **SQLite (Default Local Target):**
+  * Configured with `PRAGMA journal_mode=WAL;` and `PRAGMA foreign_keys=ON;`.
+  * Write transactions are serialized at the database file level. Primary key uniqueness on `SystemBootstrap(id=1)` combined with `_bootstrap_lock` guarantees atomic bootstrap.
+  * Verified for local stationary host operation on macOS Apple Silicon. Under high concurrency across multiple processes, SQLite writes serialize or raise `OperationalError: database is locked` if busy timeouts elapse.
+* **PostgreSQL (Supported Production Target):**
+  * In PostgreSQL, multi-version concurrency control (MVCC) with primary key index constraints on `SystemBootstrap.id=1` guarantees atomicity across distributed workers/processes.
+  * No cross-process or distributed cluster guarantees are claimed beyond single relational database ACID constraints.
+
+### 6.5 Recommendations for Production
 1. **JWT Library Migration:**
    * The current pure-standard-library implementation (`hmac`, `hashlib`, `json`, `base64`) provides a lightweight, zero-dependency, auditable RFC 7519 HMAC-SHA256 implementation suitable for the initial prototype.
    * For production, especially when adopting asymmetric signing (RS256/EdDSA) or integrating external OIDC identity providers, migrate to a dedicated, actively maintained library like `PyJWT` backed by `cryptography`.

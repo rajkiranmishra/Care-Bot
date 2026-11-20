@@ -109,9 +109,10 @@ def create_user(
                     db.add(bootstrap_marker)
                     db.flush()
 
-                    user = UserService.create_user(db, user_in)
+                    user = UserService.create_user(db, user_in, auto_commit=False)
                     bootstrap_marker.admin_user_id = user.id
                     db.commit()
+                    db.refresh(user)
                     return UserResponse.model_validate(user)
                 except IntegrityError:
                     db.rollback()
@@ -122,6 +123,9 @@ def create_user(
                 except UserConflictError as exc:
                     db.rollback()
                     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+                except Exception:
+                    db.rollback()
+                    raise
         else:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

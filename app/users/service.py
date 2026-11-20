@@ -35,8 +35,16 @@ class UserService:
     """Manages user registration, profile retrieval, and preference updates."""
 
     @staticmethod
-    def create_user(db: Session, user_in: UserCreate) -> User:
-        """Register a new user with default preferences."""
+    def create_user(db: Session, user_in: UserCreate, auto_commit: bool = True) -> User:
+        """Register a new user with default preferences.
+
+        Parameters:
+            db: Active SQLAlchemy database session.
+            user_in: Validated UserCreate payload.
+            auto_commit: If True, commits the transaction immediately. If False, flushes
+                         pending objects to assign primary keys while allowing callers to
+                         participate in an enclosing atomic transaction.
+        """
         # 1. Check for unique username
         existing_username = db.execute(
             select(User).where(User.username == user_in.username)
@@ -95,8 +103,11 @@ class UserService:
             sound_alerts_enabled=True,
         )
         db.add(db_preferences)
-        db.commit()
-        db.refresh(db_user)
+        if auto_commit:
+            db.commit()
+            db.refresh(db_user)
+        else:
+            db.flush()
         return db_user
 
     @staticmethod

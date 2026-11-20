@@ -414,3 +414,72 @@ def test_bootstrap_database_level_atomic_constraint(db_session: Session):
 
     s1.close()
     s2.close()
+
+    # Clean up directly on TestingSessionLocal to leave database pristine
+    s_cleanup = TestingSessionLocal()
+    s_cleanup.query(SystemBootstrap).delete()
+    s_cleanup.commit()
+    s_cleanup.close()
+
+
+def test_bootstrap_rejected_when_legacy_caregiver_exists_without_marker(client: TestClient, db_session: Session):
+    """Verify that in a legacy database where a caregiver exists but SystemBootstrap is empty, bootstrap is blocked."""
+    # 1. Clean out SystemBootstrap table completely (simulating an upgraded legacy database)
+    db_session.query(SystemBootstrap).delete()
+    db_session.query(User).filter(User.role == UserRole.CAREGIVER).delete()
+    db_session.commit()
+
+    # 2. Insert a legacy caregiver directly without creating a SystemBootstrap marker
+    legacy_cg = User(
+        username="legacy_head_caregiver",
+        full_name="Legacy Caregiver",
+        role=UserRole.CAREGIVER,
+        email="legacy@carebot.home",
+    )
+    db_session.add(legacy_cg)
+    db_session.commit()
+
+    # Confirm SystemBootstrap table is strictly empty
+    assert db_session.query(SystemBootstrap).count() == 0
+    # Confirm caregiver exists
+    assert db_session.query(User).filter(User.role == UserRole.CAREGIVER).count() == 1
+
+    # 3. An attacker attempts to exploit the empty SystemBootstrap table using BOOTSTRAP_TOKEN
+    attack_res = client.post(
+        "/api/v1/users",
+        json={"username": "rogue_admin", "full_name": "Rogue Admin", "role": "caregiver"},
+        headers={"X-Bootstrap-Token": TEST_BOOTSTRAP_TOKEN},
+    )
+    # Must be strictly rejected with 403 Forbidden
+    assert attack_res.status_code == 403
+    assert "already been provisioned" in attack_res.json()["detail"].lower()
+
+    # Verify no rogue admin was created
+    assert db_session.query(User).filter(User.username == "rogue_admin").first() is None
+    # SystemBootstrap remains empty
+    assert db_session.query(SystemBootstrap).count() == 0
+
+
+def test_bootstrap_transaction_rollback_on_user_creation_failure(client: TestClient, db_session: Session):
+    """Verify atomicity: if user creation fails (e.g. duplicate conflict), the bootstrap marker is rolled back."""
+    db_session.query(SystemBootstrap).delete()
+    db_session.query(User).filter(User.role == UserRole.CAREGIVER).delete()
+    db_session.commit()
+
+    # Create an ordinary resident with a known username
+    client.post(
+        "/api/v1/users",
+        json={"username": "conflict_user", "full_name": "Conflict User"},
+    )
+
+    # Attempt bootstrap using the existing username -> triggers UserConflictError
+    fail_res = client.post(
+        "/api/v1/users",
+        json={"username": "conflict_user", "full_name": "Conflict Admin", "role": "caregiver"},
+        headers={"X-Bootstrap-Token": TEST_BOOTSTRAP_TOKEN},
+    )
+    assert fail_res.status_code == 409
+    assert "already registered" in fail_res.json()["detail"].lower()
+
+    # Ensure SystemBootstrap marker was rolled back and NOT committed
+    assert db_session.query(SystemBootstrap).count() == 0
