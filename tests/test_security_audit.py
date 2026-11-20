@@ -1,10 +1,12 @@
 """Dedicated security audit tests verifying authentication, authorization, and boundaries."""
 
 import concurrent.futures
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.database.models.user import User, UserRole
+from app.database.models.user import SystemBootstrap, User, UserRole
 from tests.conftest import TEST_BOOTSTRAP_TOKEN, TEST_DEVICE_KEY, make_auth_headers
 
 
@@ -283,7 +285,7 @@ def test_public_registration_privilege_escalation_prevented(client: TestClient):
 
 def test_bootstrap_missing_secret_rejected(client: TestClient, db_session: Session):
     """Verify that an unauthenticated client cannot claim caregiver role when no bootstrap secret is provided."""
-    # Ensure no caregivers exist
+    db_session.query(SystemBootstrap).delete()
     db_session.query(User).filter(User.role == UserRole.CAREGIVER).delete()
     db_session.commit()
 
@@ -297,7 +299,7 @@ def test_bootstrap_missing_secret_rejected(client: TestClient, db_session: Sessi
 
 def test_bootstrap_incorrect_secret_rejected(client: TestClient, db_session: Session):
     """Verify that providing an incorrect bootstrap token is rejected with 401 Unauthorized."""
-    # Ensure no caregivers exist
+    db_session.query(SystemBootstrap).delete()
     db_session.query(User).filter(User.role == UserRole.CAREGIVER).delete()
     db_session.commit()
 
@@ -312,7 +314,7 @@ def test_bootstrap_incorrect_secret_rejected(client: TestClient, db_session: Ses
 
 def test_bootstrap_successful_initial_provisioning(client: TestClient, db_session: Session):
     """Verify that the initial administrator can be successfully provisioned using the valid bootstrap token."""
-    # Ensure no caregivers exist
+    db_session.query(SystemBootstrap).delete()
     db_session.query(User).filter(User.role == UserRole.CAREGIVER).delete()
     db_session.commit()
 
@@ -329,7 +331,7 @@ def test_bootstrap_successful_initial_provisioning(client: TestClient, db_sessio
 
 def test_bootstrap_reuse_after_provisioning_rejected(client: TestClient, db_session: Session):
     """Verify that the bootstrap token cannot be reused once an administrator account exists."""
-    # First, provision the administrator
+    db_session.query(SystemBootstrap).delete()
     db_session.query(User).filter(User.role == UserRole.CAREGIVER).delete()
     db_session.commit()
 
@@ -352,6 +354,7 @@ def test_bootstrap_reuse_after_provisioning_rejected(client: TestClient, db_sess
 
 def test_bootstrap_concurrent_first_admin_provisioning(client: TestClient, db_session: Session):
     """Verify that concurrent requests with the bootstrap token cannot create multiple administrators."""
+    db_session.query(SystemBootstrap).delete()
     db_session.query(User).filter(User.role == UserRole.CAREGIVER).delete()
     db_session.commit()
 
@@ -386,3 +389,28 @@ def test_bootstrap_concurrent_first_admin_provisioning(client: TestClient, db_se
         .all()
     )
     assert len(caregivers) == 1
+
+
+def test_bootstrap_database_level_atomic_constraint(db_session: Session):
+    """Verify that database-level primary key constraint enforces atomicity across independent processes/transactions."""
+    from tests.conftest import TestingSessionLocal
+
+    db_session.query(SystemBootstrap).delete()
+    db_session.commit()
+
+    # Session 1 inserts SystemBootstrap(id=1)
+    s1 = TestingSessionLocal()
+    b1 = SystemBootstrap(id=1, is_bootstrapped=True)
+    s1.add(b1)
+    s1.commit()
+
+    # Session 2 attempts concurrent insertion of SystemBootstrap(id=1)
+    s2 = TestingSessionLocal()
+    b2 = SystemBootstrap(id=1, is_bootstrapped=True)
+    s2.add(b2)
+    with pytest.raises(IntegrityError):
+        s2.flush()
+    s2.rollback()
+
+    s1.close()
+    s2.close()

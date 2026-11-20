@@ -4,6 +4,7 @@ import hmac
 import threading
 from typing import List, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
@@ -15,7 +16,7 @@ from app.api.deps import (
     verify_device_auth,
     verify_user_access,
 )
-from app.database.models.user import OperatingMode, SupportedLanguage, User, UserRole
+from app.database.models.user import OperatingMode, SupportedLanguage, SystemBootstrap, User, UserRole
 from app.users.schemas import (
     UserCreate,
     UserNfcLookupResponse,
@@ -85,21 +86,41 @@ def create_user(
                     detail="Invalid bootstrap token.",
                 )
 
-            # Atomic concurrency protection: ensure only one administrator can be bootstrapped
+            # Atomic concurrency protection: in-process mutex AND database-level unique constraint
+            # to guarantee that multiple threads, processes, or Uvicorn workers cannot race.
             with _bootstrap_lock:
                 db.expire_all()
                 has_caregiver = (
                     db.query(User).filter(User.role == UserRole.CAREGIVER).first() is not None
                 )
-                if has_caregiver:
+                has_bootstrap_marker = (
+                    db.query(SystemBootstrap).filter(SystemBootstrap.id == 1).first() is not None
+                )
+                if has_caregiver or has_bootstrap_marker:
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="Initial administrator bootstrap is disabled: An administrator account has already been provisioned.",
                     )
                 try:
+                    # Database-level atomic latch: inserting SystemBootstrap(id=1) guarantees that
+                    # even across multiple operating system processes or Uvicorn workers,
+                    # the database engine's primary key constraint serializes and rejects concurrent attempts.
+                    bootstrap_marker = SystemBootstrap(id=1, is_bootstrapped=True)
+                    db.add(bootstrap_marker)
+                    db.flush()
+
                     user = UserService.create_user(db, user_in)
+                    bootstrap_marker.admin_user_id = user.id
+                    db.commit()
                     return UserResponse.model_validate(user)
+                except IntegrityError:
+                    db.rollback()
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Initial administrator bootstrap is disabled: An administrator account has already been provisioned.",
+                    )
                 except UserConflictError as exc:
+                    db.rollback()
                     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
         else:
             raise HTTPException(

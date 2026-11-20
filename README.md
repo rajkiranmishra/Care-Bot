@@ -65,12 +65,12 @@ CARE-BOT/
 │   ├── services/           # External integrations (weather, adapters)
 │   └── speech/             # Offline STT, TTS & audio streaming (Phase 7)
 │
-└── tests/                  # Automated Pytest Suite (55 Unit & Integration Tests)
+└── tests/                  # Automated Pytest Suite (56 Unit & Integration Tests)
     ├── conftest.py         # In-memory SQLite fixtures, TestClient & auth token helpers
     ├── test_config.py      # Settings, secret validation & environment tests
     ├── test_database.py    # Database connection & transaction tests
     ├── test_security.py    # PBKDF2 600k hashing, salt, JWT token & RFC claims tests
-    ├── test_security_audit.py # RBAC, token auth, privilege escalation, bootstrap & NFC audit tests
+    ├── test_security_audit.py # RBAC, token auth, multi-process bootstrap & NFC audit tests
     ├── test_users.py       # User CRUD, operating modes & preferences tests
     ├── test_conversations.py # Session persistence & cross-user isolation tests
     ├── test_context_engine.py # Context synthesis & language prompt tests
@@ -145,18 +145,18 @@ Run the complete test suite:
 pytest -v
 ```
 
-All 55 unit and security integration tests execute in under 0.8 seconds against an isolated in-memory SQLite database.
+All 56 unit and security integration tests execute in under 0.8 seconds against an isolated in-memory SQLite database.
 
 ---
 
 ## 6. Security Model, Privilege Boundaries & Documented Limitations
 
 ### 6.1 Confirmed Security Protections
-1. **Privilege Escalation Prevention & Bootstrap Security:**
+1. **Privilege Escalation Prevention & Multi-Process Bootstrap Security:**
    * Public self-registration (`POST /api/v1/users`) is strictly restricted to the `resident` role. An unauthenticated client cannot claim administrator privileges merely because the database is empty.
    * Initial administrator provisioning requires an explicit, cryptographically secure one-time secret (`X-Bootstrap-Token`) matching `BOOTSTRAP_TOKEN`.
-   * The bootstrap mechanism is single-use and permanently disabled once the first administrator account is created.
-   * Concurrent registration attempts are serialized with an atomic process lock (`_bootstrap_lock`), ensuring race conditions cannot create multiple initial administrators.
+   * **Multi-Process Atomic Protection:** Both in-process mutex locking (`_bootstrap_lock`) and database-level primary key uniqueness (`SystemBootstrap` with `id=1`) enforce that even with multiple Uvicorn workers (`--workers 4`) or multiple distributed instances, only a single initial administrator can ever commit.
+   * The bootstrap mechanism is permanently disabled once the first administrator account is created.
    * Ongoing assignment of elevated roles requires an authenticated `Caregiver` session or authorized device provisioning via `X-Device-Key`.
    * The bootstrap secret is never logged, serialized in API models, or committed to Git.
 2. **Assistant Message Impersonation Block:**
@@ -165,19 +165,44 @@ All 55 unit and security integration tests execute in under 0.8 seconds against 
    * Passwords hashed using PBKDF2-HMAC-SHA256 with 600,000 rounds (OWASP 2023) and 16-byte cryptographically secure random salt.
    * Passwords, hashes, and salts are never returned in responses, serialized schemas, or logs.
 4. **Physical NFC Hardware Security:**
-   * NFC lookup endpoint requires either a valid hardware `X-Device-Key` (verified via `hmac.compare_digest`) or an authenticated session token.
+   * NFC lookup endpoint requires either a valid hardware `X-Device-Key` (verified via constant-time `hmac.compare_digest`) or an authenticated session token.
    * Possession of a card identifier alone never exposes private user records, returning only minimal non-PII identity info.
    * `DEVICE_API_KEY` defaults to `None`; no insecure static default is present in settings.
 5. **Production Secret Enforcement:**
    * In `ENVIRONMENT=production`, application startup fails fast if `SECRET_KEY` is under 32 characters or contains dev/insecure markers, if `DEVICE_API_KEY` is not explicitly configured, or if `BOOTSTRAP_TOKEN` is weak.
 
-### 6.2 Documented System Limitations (Phase 3)
+### 6.2 Bootstrap Token Lifecycle & Disaster Recovery
+1. **Token Generation:**
+   Generate a 256-bit CSPRNG secret on the host machine:
+   ```bash
+   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+   ```
+2. **Secure Configuration:**
+   Place the token in `.env` on the host:
+   ```bash
+   echo 'BOOTSTRAP_TOKEN="<generated_token>"' >> .env
+   chmod 600 .env
+   ```
+3. **Execution:**
+   Submit initial administrator registration:
+   ```bash
+   curl -X POST http://127.0.0.1:8000/api/v1/users \
+     -H "Content-Type: application/json" \
+     -H "X-Bootstrap-Token: <generated_token>" \
+     -d '{"username": "admin", "full_name": "System Administrator", "password": "SecurePassword123!", "role": "caregiver"}'
+   ```
+4. **Disablement & Cleanup:**
+   Once `SystemBootstrap(id=1)` is committed to the database, remove or comment out `BOOTSTRAP_TOKEN` from `.env` and restart the server so the secret no longer resides in process memory.
+5. **Administrator Recovery Procedure:**
+   If the administrator account is locked or credentials are lost, **never re-open public bootstrap over the network**. Recovery must be performed via local host access (e.g. running a dedicated maintenance script with root permissions or updating the password hash directly in SQLite on the local filesystem).
+
+### 6.3 Documented System Limitations (Phase 3)
 * **Caregiver-to-Resident Authorization Scope:**
   * Any user assigned the `CAREGIVER` role currently possesses system-wide oversight across all residents in the local deployment.
   * Explicit fine-grained caregiver-to-resident assignments (e.g. a `CaregiverResidentMapping` join model) are not yet implemented in Phase 3.
   * Do not claim per-resident multi-tenant authorization until explicit relationship mappings are implemented.
 
-### 6.3 Recommendations for Production
+### 6.4 Recommendations for Production
 1. **JWT Library Migration:**
    * The current pure-standard-library implementation (`hmac`, `hashlib`, `json`, `base64`) provides a lightweight, zero-dependency, auditable RFC 7519 HMAC-SHA256 implementation suitable for the initial prototype.
    * For production, especially when adopting asymmetric signing (RS256/EdDSA) or integrating external OIDC identity providers, migrate to a dedicated, actively maintained library like `PyJWT` backed by `cryptography`.
