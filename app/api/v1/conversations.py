@@ -21,7 +21,8 @@ from app.conversation.service import (
 from app.core.context_engine import ContextEngine
 from app.database.models.conversation import MessageRole, SessionStatus
 from app.database.models.user import User, UserRole
-from app.users.service import UserNotFoundError
+from app.intelligence import ChatTurnRequest, ChatTurnResponse, ConversationEngine
+from app.users.service import UserService, UserNotFoundError
 
 router = APIRouter(prefix="/conversations", tags=["Conversation Context"])
 
@@ -205,3 +206,45 @@ def get_user_llm_context(
         return ContextEngine.get_user_context(db, user_id, history_window=history_window)
     except UserNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+
+@router.post(
+    "/users/{user_id}/chat",
+    response_model=ChatTurnResponse,
+    summary="Execute a conversational interaction turn with CARE-BOT",
+)
+async def chat_turn(
+    user_id: int,
+    request: ChatTurnRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ChatTurnResponse:
+    """Execute a conversational interaction turn through the ConversationEngine.
+
+    SECURITY INVARIANTS:
+    1. Authenticated caller identity and verify_user_access determine permission.
+    2. Any arbitrary user_id supplied in a request body is completely ignored.
+    3. Family Viewers have read-only privileges and cannot execute chat turns (which mutate dialogue state).
+    4. Deterministic emergency detection executes before any local LLM generation.
+    """
+    verify_user_access(user_id, current_user)
+
+    if current_user.role == UserRole.FAMILY_VIEWER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Family viewers have read-only access and cannot execute conversational turns",
+        )
+
+    try:
+        target_user = UserService.get_by_id(db, user_id)
+    except UserNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    engine = ConversationEngine()
+    try:
+        return await engine.process_turn(db, target_user, request)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except SessionAccessDeniedError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+

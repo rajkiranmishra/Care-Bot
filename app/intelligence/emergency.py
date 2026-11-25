@@ -99,7 +99,7 @@ URGENT_PATTERNS: List[Tuple[Pattern, str]] = [
 # C. Uncertain / Ambiguous Distress Patterns (Requires active, immediate voice confirmation)
 UNCERTAIN_PATTERNS: List[Tuple[Pattern, str]] = [
     # English
-    (re.compile(r"\b(i\s+feel\s+(very\s+)?(dizzy|faint|sick|terrible|awful|unwell))\b"), "English: Acute dizziness or malaise"),
+    (re.compile(r"\b(i\s+feel\s+(a\s+little\s+|very\s+|so\s+|a\s+bit\s+)?(dizzy|faint|sick|terrible|awful|unwell))\b"), "English: Acute dizziness or malaise"),
     (re.compile(r"\b(everything\s+is\s+(still\s+)?spinning|something\s+is\s+(very\s+)?wrong|i\s+don\s*t\s+feel\s+safe)\b"), "English: Sudden disorientation or distress"),
     (re.compile(r"\b(head\s+hurts\s+badly|severe\s+headache|blacking\s+out)\b"), "English: Severe headache or fading vision"),
 

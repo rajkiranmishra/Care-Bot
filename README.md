@@ -59,10 +59,11 @@ CARE-BOT/
 │   │   ├── schemas.py      # User and Preferences Pydantic validation schemas
 │   │   └── service.py      # User registration & preferences business logic
 │   │
-│   ├── intelligence/       # Intelligence Engine (Phase 4.1)
-│   │   ├── schemas.py      # Pydantic schemas for intents, actions & LLM responses
+│   ├── intelligence/       # Intelligence Engine (Phase 4.1 & 4.2)
+│   │   ├── schemas.py      # Pydantic schemas for intents, actions, LLM responses & chat turns
 │   │   ├── llm_client.py   # LocalLLMClient protocol & MockLLMClient
 │   │   ├── emergency.py    # Deterministic pre-LLM emergency signal detection
+│   │   ├── engine.py       # ConversationEngine orchestrator (Phase 4.2)
 │   │   ├── prompt_builder.py # Persona prompt builder with JSON schema guidance
 │   │   ├── parser.py       # Defensive JSON extractor and safe fallback parser
 │   │   ├── intent.py       # Intent classification interfaces & routing
@@ -74,7 +75,7 @@ CARE-BOT/
 │   ├── services/           # External integrations (weather, adapters)
 │   └── speech/             # Offline STT, TTS & audio streaming (Phase 7)
 │
-└── tests/                  # Automated Pytest Suite (99 Unit & Integration Tests)
+└── tests/                  # Automated Pytest Suite (113 Unit & Integration Tests)
     ├── conftest.py         # In-memory SQLite fixtures, TestClient & auth token helpers
     ├── test_config.py      # Settings, secret validation & environment tests
     ├── test_database.py    # Database connection & transaction tests
@@ -83,6 +84,7 @@ CARE-BOT/
     ├── test_users.py       # User CRUD, operating modes & preferences tests
     ├── test_conversations.py # Session persistence & cross-user isolation tests
     ├── test_context_engine.py # Context synthesis & language prompt tests
+    ├── test_conversation_engine.py # Phase 4.2 ConversationEngine unit & integration tests (14 Tests)
     ├── test_api/
     │   └── test_health.py  # Health check & diagnostic endpoint tests
     └── test_intelligence/  # Phase 4.1 Intelligence & Emergency Tests (41 Tests)
@@ -150,6 +152,7 @@ The server will start at:
 * `POST /api/v1/conversations/users/{user_id}/sessions/{session_id}/messages`: Append user utterance (rejects client impersonation of assistant messages).
 * `GET /api/v1/conversations/users/{user_id}/sessions/{session_id}/messages`: Retrieve chronological dialogue.
 * `GET /api/v1/conversations/users/{user_id}/context`: Compile structured context payload for local LLM inference.
+* `POST /api/v1/conversations/users/{user_id}/chat`: Execute authenticated, multi-turn conversational turn orchestrated by `ConversationEngine` with deterministic pre-LLM emergency signal interception, context synthesis, sliding dialogue history, and RBAC action permissions.
 
 ---
 
@@ -161,7 +164,7 @@ Run the complete test suite:
 pytest -v
 ```
 
-All 99 unit, integration, and intelligence security tests execute in under 0.8 seconds against an isolated in-memory SQLite database.
+All 113 unit, integration, and intelligence security tests execute in under 0.9 seconds against an isolated in-memory SQLite database.
 
 ---
 
@@ -264,3 +267,150 @@ The emergency signal detection layer executes **before** LLM inference:
 3. **Parameter Schema Boundaries:** Parameters are validated by `ActionValidator` with strict bounds (e.g. string lengths, time formats).
 4. **Server-Side Authorization Invariant:** Model outputs can **never** override server-side authorization. `PermissionChecker` validates every proposed action against the authenticated user's actual role (Family Viewers cannot mutate state).
 5. **Fail-Safe Response Parsing:** `ResponseParser` extracts JSON from markdown or chatter, tolerates missing non-critical fields, and falls back to safe conversational defaults upon syntax errors without crashing route handlers.
+
+---
+
+## 8. Phase 4.2 Conversation Engine Orchestration Architecture
+
+### 8.1 Orchestration Workflow & Safety Order
+The `ConversationEngine` (`app/intelligence/engine.py`) coordinates multi-turn dialogue across user identity, operating modes, context synthesis, dialogue history, and local model inference:
+
+```
+[User Utterance (HTTP / WebSocket)]
+                 │
+                 ▼
+[Step 1: Deterministic Pre-LLM Emergency Evaluation]
+        │                                 │
+   (CRITICAL / URGENT)             (NORMAL / UNCERTAIN)
+        │                                 │
+        ▼                                 ▼
+[Emergency Fast-Path]            [Step 2: Context Engine Synthesis]
+• Bypass LLM completely         • Profile, mode, preferences, sliding history
+• Preserve active alert          • Build prompt via PromptBuilder
+• Safe, truthful response                 │
+• Record in DB                            ▼
+                                 [Step 3: Local LLM Inference]
+                                 • MockLLMClient (zero external model download)
+                                 • Async timeout & failure protection
+                                          │
+                                          ▼
+                                 [Step 4: Defensive Response Parsing]
+                                 • ResponseParser extracts structured JSON
+                                 • Markdown / chatter resilience
+                                          │
+                                          ▼
+                                 [Step 5: Action & Boundary Validation]
+                                 • ActionValidator enforces whitelist
+                                 • Bounds check string & numeric inputs
+                                          │
+                                          ▼
+                                 [Step 6: Server-Side RBAC Enforcement]
+                                 • PermissionChecker validates user permissions
+                                 • Family Viewer read-only block
+                                          │
+                                          ▼
+                                 [Step 7: Database Persistence & FSM Update]
+                                 • Persist user & assistant messages to DB
+                                 • Advance session state to ACTIVE_CONVERSATION
+                                          │
+                                          ▼
+                                 [Step 8: Structured Turn Response Returned]
+```
+
+### 8.2 Safety Invariants & Emergency State Machines
+1. **Deterministic Pre-LLM Emergency Interception:**
+   Emergency detection (`EmergencySignalDetector.evaluate_utterance`) strictly executes before context compilation or model invocation. Critical distress signals bypass LLM execution completely, guaranteeing sub-second response times and eliminating latency or failure risks.
+2. **Confirmed Emergency Retention Invariant:**
+   If a user utters an affirmative phrase (e.g. *"I am fine"*, *"sab theek hai"*, *"aami bhalo aachi"*) while an active `CRITICAL` emergency is recorded in the session, the engine preserves `severity=CRITICAL` and sets `pending_resolution=True`. The active emergency remains in effect until an authorized caregiver resolution workflow is completed. Elderly residents who have suffered a fall or head injury may reflexively or confusedly report feeling fine; verbal affirmations alone must never cancel an acute physical alert.
+3. **Uncertain Distress Safe Stand-Down:**
+   In contrast to acute emergencies, ordinary ambiguous check-ins (e.g. mild dizziness) can be stood down when the resident confirms they are safe (`is_safe_confirmed=True`), transitioning the session back to normal conversational state without requiring caregiver intervention.
+4. **Truthful System Communication:**
+   Emergency responses honestly disclose system capabilities. The assistant confirms that the high-priority alert protocol is triggered and registered locally, but never falsely claims that 911 or emergency services have been dispatched without an active, verified third-party integration.
+5. **Zero External Inference Dependencies:**
+   Phase 4.2 integrates `MockLLMClient` with deterministic responses, allowing full unit, integration, and end-to-end HTTP testing without requiring Ollama runtime installations, background model daemons, or downloading multi-gigabyte neural weights.
+
+### 8.3 Authenticated Chat Turn API (`POST /api/v1/conversations/users/{user_id}/chat`)
+* **Endpoint:** `POST /api/v1/conversations/users/{user_id}/chat`
+* **Authentication:** `Authorization: Bearer <JWT>`
+* **Authorization Scope:** The authenticated user must match `user_id`, or have the `CAREGIVER` role. Family Viewers have read-only permissions and are rejected with HTTP 403 Forbidden.
+* **Identity Security:** The target `user_id` is bound exclusively from the validated URL path parameter. Any arbitrary `user_id` in request payloads is ignored.
+
+#### Example Request:
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/conversations/users/1/chat \
+  -H "Authorization: Bearer <RESIDENT_JWT>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "utterance": "What medications do I have scheduled for this morning?"
+  }'
+```
+
+#### Example Conversational Response:
+```json
+{
+  "session_id": 1,
+  "user_message_id": 1,
+  "user_utterance": "What medications do I have scheduled for this morning?",
+  "assistant_message_id": 2,
+  "spoken_response": "You have your blood pressure medication scheduled for 9:00 AM.",
+  "intent": "general_chat",
+  "proposed_action": {
+    "action_type": "none",
+    "parameters": {},
+    "requires_confirmation": false
+  },
+  "emergency_signal": {
+    "detected": false,
+    "severity": "normal",
+    "trigger_phrase": null,
+    "confidence": 0.0,
+    "reasoning": "No emergency signal detected",
+    "is_safe_confirmed": false,
+    "requires_confirmation": false,
+    "requires_immediate_escalation": false,
+    "repeat_count": 0,
+    "user_affirmation": null,
+    "pending_resolution": false
+  },
+  "session_state": "active_conversation",
+  "active_emergency": false,
+  "pending_resolution": false
+}
+```
+
+#### Example Emergency Fast-Path Response:
+```json
+{
+  "session_id": 1,
+  "user_message_id": 3,
+  "user_utterance": "I fell down and cannot get up, help!",
+  "assistant_message_id": 4,
+  "spoken_response": "I have registered a critical emergency: Fall detected (unable to rise). I am notifying your caregiver right away. Please stay still and do not try to move.",
+  "intent": "emergency",
+  "proposed_action": {
+    "action_type": "trigger_emergency_alert",
+    "parameters": {
+      "severity": "critical",
+      "trigger_phrase": "fell down and cannot get up",
+      "repeat_count": 0
+    },
+    "requires_confirmation": false
+  },
+  "emergency_signal": {
+    "detected": true,
+    "severity": "critical",
+    "trigger_phrase": "fell down and cannot get up",
+    "confidence": 1.0,
+    "reasoning": "English: Fall detected (unable to rise)",
+    "is_safe_confirmed": false,
+    "requires_confirmation": false,
+    "requires_immediate_escalation": true,
+    "repeat_count": 0,
+    "user_affirmation": null,
+    "pending_resolution": false
+  },
+  "session_state": "active_conversation",
+  "active_emergency": true,
+  "pending_resolution": false
+}
+```

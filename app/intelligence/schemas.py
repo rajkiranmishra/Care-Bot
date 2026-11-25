@@ -180,3 +180,27 @@ class ModelMetadata(BaseModel):
     quantization: Optional[str] = None
 
     model_config = ConfigDict(frozen=True)
+
+
+class ChatTurnRequest(BaseModel):
+    """Client payload submitting a conversational utterance."""
+    utterance: str = Field(..., min_length=1, max_length=2000, description="User spoken or typed input text")
+    session_id: Optional[str] = Field(default=None, max_length=36, description="Optional target conversation session ID")
+
+
+class ChatTurnResponse(BaseModel):
+    """Structured response from the ConversationEngine turn execution."""
+    session_id: str
+    user_message_id: int
+    user_utterance: str
+    assistant_message_id: int
+    spoken_response: str
+    intent: IntentType
+    proposed_action: ProposedAction
+    emergency_signal: EmergencySignal
+    session_state: str
+    active_emergency: bool = False
+    pending_resolution: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
