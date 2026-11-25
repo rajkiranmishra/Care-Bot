@@ -75,7 +75,7 @@ CARE-BOT/
 │   ├── services/           # External integrations (weather, adapters)
 │   └── speech/             # Offline STT, TTS & audio streaming (Phase 7)
 │
-└── tests/                  # Automated Pytest Suite (130 Unit & Integration Tests)
+└── tests/                  # Automated Pytest Suite (131 Unit & Integration Tests)
     ├── conftest.py         # In-memory SQLite fixtures, TestClient & auth token helpers
     ├── test_config.py      # Settings, secret validation & environment tests
     ├── test_database.py    # Database connection & transaction tests
@@ -84,7 +84,7 @@ CARE-BOT/
     ├── test_users.py       # User CRUD, operating modes & preferences tests
     ├── test_conversations.py # Session persistence & cross-user isolation tests
     ├── test_context_engine.py # Context synthesis & language prompt tests
-    ├── test_conversation_engine.py # Phase 4.2 ConversationEngine unit & integration tests (31 Tests)
+    ├── test_conversation_engine.py # Phase 4.2 ConversationEngine unit & integration tests (32 Tests)
     ├── test_api/
     │   └── test_health.py  # Health check & diagnostic endpoint tests
     └── test_intelligence/  # Phase 4.1 Intelligence & Emergency Tests (41 Tests)

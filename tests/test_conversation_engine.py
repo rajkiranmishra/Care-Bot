@@ -710,10 +710,10 @@ def test_caregiver_can_resolve_emergency_successfully(client: TestClient):
     assert turn1.status_code == 200
     assert turn1.json()["active_emergency"] is True
 
-    # 2. Assign caregiver to resident
+    # 2. Assign caregiver to resident (authorized by resident)
     assign_res = client.post(
         f"/api/v1/users/{resident['id']}/caregivers/{caregiver['id']}",
-        headers=cg_headers,
+        headers=res_headers,
     )
     assert assign_res.status_code == 200
 
@@ -829,10 +829,10 @@ def test_caregiver_resolution_resident_specific_authorization(client: TestClient
     cg_unrel_headers = make_auth_headers(user_id=cg_unrelated["id"], username="cg_unrelated", role="caregiver")
     viewer_headers = make_auth_headers(user_id=viewer["id"], username="viewer_auth_test", role="family_viewer")
 
-    # Explicitly assign cg_authorized to res
+    # Explicitly assign cg_authorized to res (authorized by resident)
     assign_res = client.post(
         f"/api/v1/users/{res['id']}/caregivers/{cg_authorized['id']}",
-        headers=cg_auth_headers,
+        headers=res_headers,
     )
     assert assign_res.status_code == 200
 
@@ -1086,4 +1086,93 @@ async def test_notification_status_semantics_distinctions(db_session: Session):
     assert simulated_gateway_signal.delivery_confirmed is True
     # Crucial: delivery_confirmed does NOT set caregiver_acknowledged!
     assert simulated_gateway_signal.caregiver_acknowledged is False
+
+
+def test_caregiver_assignment_authorization_and_anti_self_assignment(client: TestClient):
+    """Verify security invariant: caregivers cannot assign themselves to arbitrary residents.
+
+    Authorization is strictly restricted to:
+    1. Authorized hardware device administrator (X-Device-Key).
+    2. The target resident themselves.
+    3. The primary system bootstrap administrator.
+    4. An existing assigned caregiver (delegating to a co-caregiver).
+    """
+    res1 = client.post("/api/v1/users", json={"username": "assign_res1", "full_name": "Resident 1"}).json()
+    cg1 = client.post(
+        "/api/v1/users",
+        json={"username": "assign_cg1", "full_name": "Caregiver 1", "role": "caregiver"},
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    ).json()
+    cg2 = client.post(
+        "/api/v1/users",
+        json={"username": "assign_cg2", "full_name": "Caregiver 2", "role": "caregiver"},
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    ).json()
+
+    res1_headers = make_auth_headers(user_id=res1["id"], username="assign_res1", role="resident")
+    cg1_headers = make_auth_headers(user_id=cg1["id"], username="assign_cg1", role="caregiver")
+    cg2_headers = make_auth_headers(user_id=cg2["id"], username="assign_cg2", role="caregiver")
+
+    # 1. Unassigned Caregiver 1 attempts to assign themselves to Resident 1 -> 403 Forbidden
+    self_assign = client.post(
+        f"/api/v1/users/{res1['id']}/caregivers/{cg1['id']}",
+        headers=cg1_headers,
+    )
+    assert self_assign.status_code == 403
+    assert "Caregivers cannot assign themselves" in self_assign.json()["detail"]
+
+    # 2. Unassigned Caregiver 1 attempts to assign Caregiver 2 to Resident 1 -> 403 Forbidden
+    unrelated_assign = client.post(
+        f"/api/v1/users/{res1['id']}/caregivers/{cg2['id']}",
+        headers=cg1_headers,
+    )
+    assert unrelated_assign.status_code == 403
+    assert "Not authorized to assign caregivers" in unrelated_assign.json()["detail"]
+
+    # 3. Resident 1 authorizes Caregiver 1 for themselves -> 200 OK
+    res_assign = client.post(
+        f"/api/v1/users/{res1['id']}/caregivers/{cg1['id']}",
+        headers=res1_headers,
+    )
+    assert res_assign.status_code == 200
+    assert res_assign.json()["status"] == "assigned"
+
+    # 4. Caregiver 1 (now assigned to Resident 1) delegates/adds Caregiver 2 as co-caregiver -> 200 OK
+    cg1_adds_cg2 = client.post(
+        f"/api/v1/users/{res1['id']}/caregivers/{cg2['id']}",
+        headers=cg1_headers,
+    )
+    assert cg1_adds_cg2.status_code == 200
+    assert cg1_adds_cg2.json()["status"] == "assigned"
+
+    # 5. Device admin assigns a caregiver -> 200 OK
+    device_assign = client.post(
+        f"/api/v1/users/{res1['id']}/caregivers/{cg2['id']}",
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    )
+    assert device_assign.status_code == 200
+
+    # 6. Unrelated third party (Caregiver 3) attempts to revoke Caregiver 2 -> 403 Forbidden
+    cg3 = client.post(
+        "/api/v1/users",
+        json={"username": "assign_cg3", "full_name": "Caregiver 3", "role": "caregiver"},
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    ).json()
+    cg3_headers = make_auth_headers(user_id=cg3["id"], username="assign_cg3", role="caregiver")
+
+    unrelated_del = client.delete(
+        f"/api/v1/users/{res1['id']}/caregivers/{cg2['id']}",
+        headers=cg3_headers,
+    )
+    assert unrelated_del.status_code == 403
+    assert "Not authorized to revoke caregiver assignments" in unrelated_del.json()["detail"]
+
+    # 7. Resident 1 revokes Caregiver 2 -> 200 OK
+    res_del = client.delete(
+        f"/api/v1/users/{res1['id']}/caregivers/{cg2['id']}",
+        headers=res1_headers,
+    )
+    assert res_del.status_code == 200
+    assert res_del.json()["status"] == "removed"
+
 

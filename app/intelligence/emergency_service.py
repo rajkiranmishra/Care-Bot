@@ -71,25 +71,34 @@ class EmergencyService:
             if user_affirmation:
                 existing.user_affirmation = user_affirmation
             emergency_record = existing
+            if commit:
+                try:
+                    db.commit()
+                    db.refresh(emergency_record)
+                except Exception:
+                    db.rollback()
+                    raise
         else:
-            emergency_record = ActiveEmergency(
-                user_id=user_id,
-                severity=severity.value,
-                trigger_phrase=trigger_phrase,
-                reasoning=reasoning,
-                status=status_str,
-                user_affirmation=user_affirmation,
-                is_resolved=False,
-            )
-            db.add(emergency_record)
-
-        if commit:
+            # Use a savepoint (begin_nested) to isolate the insert.
+            # If a concurrent transaction inserted an unresolved record for this resident in the
+            # interim, the resulting IntegrityError from uq_active_emergency_user_unresolved
+            # rolls back ONLY the savepoint, leaving the outer transaction clean and allowing
+            # safe query and update of the existing record.
             try:
-                db.commit()
-                db.refresh(emergency_record)
+                with db.begin_nested():
+                    emergency_record = ActiveEmergency(
+                        user_id=user_id,
+                        severity=severity.value,
+                        trigger_phrase=trigger_phrase,
+                        reasoning=reasoning,
+                        status=status_str,
+                        user_affirmation=user_affirmation,
+                        is_resolved=False,
+                    )
+                    db.add(emergency_record)
+                    db.flush()
             except IntegrityError:
-                db.rollback()
-                # Race condition: another concurrent transaction created the active emergency
+                # Savepoint was automatically rolled back; outer transaction is healthy and intact.
                 existing = EmergencyService.get_active_emergency(db, user_id)
                 if existing:
                     if severity in (EmergencySeverity.CRITICAL, EmergencySeverity.URGENT):
@@ -100,10 +109,17 @@ class EmergencyService:
                     existing.status = status_str
                     if user_affirmation:
                         existing.user_affirmation = user_affirmation
+                    emergency_record = existing
+                else:
+                    raise
+
+            if commit:
+                try:
                     db.commit()
-                    db.refresh(existing)
-                    return existing
-                raise
+                    db.refresh(emergency_record)
+                except Exception:
+                    db.rollback()
+                    raise
 
         return emergency_record
 
@@ -157,8 +173,13 @@ class EmergencyService:
                 except Exception:
                     pass
 
-        db.commit()
-        db.refresh(record)
+        try:
+            db.commit()
+            db.refresh(record)
+        except Exception:
+            db.rollback()
+            raise
+
         logger.info(
             "Emergency %d for resident %d resolved by caregiver %d",
             record.id,
