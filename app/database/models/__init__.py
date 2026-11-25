@@ -8,6 +8,7 @@ from app.database.models.user import (
     SupportedLanguage,
     ResponseStyle,
     SystemBootstrap,
+    CaregiverResidentAssignment,
 )
 from app.database.models.conversation import (
     ConversationSession,
@@ -32,4 +33,5 @@ __all__ = [
     "ConversationState",
     "MessageRole",
     "ActiveEmergency",
+    "CaregiverResidentAssignment",
 ]

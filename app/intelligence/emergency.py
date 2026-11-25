@@ -58,7 +58,7 @@ AFFIRMATIVE_SAFE_PATTERNS: List[Pattern] = [
 # A. Critical Emergency Patterns (Immediate physical danger, severe trauma, acute collapse)
 CRITICAL_PATTERNS: List[Tuple[Pattern, str]] = [
     # English Falls, Inability to get up, Acute trauma
-    (re.compile(r"\b(i\s+(have\s+)?fell\s+(down|over)|i\s+fall\s+down|fallen\s+down|slipped\s+and\s+fell)\b"), "English: Physical fall detected"),
+    (re.compile(r"\b(i\s+(have\s+)?(fell|fallen)\s+(down|over)|i\s+fall\s+down|fallen\s+down|slipped\s+and\s+fell|collapsed)\b"), "English: Physical fall or collapse detected"),
     (re.compile(r"\b(can\s*not|can\s*t|unable\s+to)\s+(get\s+up|stand\s+up|move|breathe|breath)\b"), "English: Inability to rise or breathe"),
     (re.compile(r"\b(chest\s+pain|heart\s+attack|pain\s+in\s+(my\s+)?chest|having\s+a\s+stroke)\b"), "English: Acute cardiovascular distress"),
     (re.compile(r"\b(call\s+(an\s+)?ambulance|call\s+(911|112|108)|call\s+emergency)\b"), "English: Explicit emergency service dispatch request"),

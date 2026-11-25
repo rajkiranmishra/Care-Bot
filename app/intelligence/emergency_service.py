@@ -5,12 +5,14 @@ import json
 import logging
 from typing import Optional
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database.models.conversation import ConversationSession
 from app.database.models.emergency import ActiveEmergency
 from app.database.models.user import User, UserRole
 from app.intelligence.schemas import EmergencySeverity
+from app.users.service import UserService
 
 logger = logging.getLogger("carebot.intelligence.emergency_service")
 
@@ -82,8 +84,26 @@ class EmergencyService:
             db.add(emergency_record)
 
         if commit:
-            db.commit()
-            db.refresh(emergency_record)
+            try:
+                db.commit()
+                db.refresh(emergency_record)
+            except IntegrityError:
+                db.rollback()
+                # Race condition: another concurrent transaction created the active emergency
+                existing = EmergencyService.get_active_emergency(db, user_id)
+                if existing:
+                    if severity in (EmergencySeverity.CRITICAL, EmergencySeverity.URGENT):
+                        existing.severity = severity.value
+                    if trigger_phrase:
+                        existing.trigger_phrase = trigger_phrase
+                    existing.reasoning = reasoning
+                    existing.status = status_str
+                    if user_affirmation:
+                        existing.user_affirmation = user_affirmation
+                    db.commit()
+                    db.refresh(existing)
+                    return existing
+                raise
 
         return emergency_record
 
@@ -97,13 +117,20 @@ class EmergencyService:
         """Execute authorized resolution procedure to clear an active emergency.
 
         SECURITY RULE:
-        Only an authorized caregiver may resolve an emergency.
-        Residents and Family Viewers are strictly prohibited.
+        1. Only an authorized caregiver may resolve an emergency.
+        2. The caregiver must be explicitly assigned to the specific resident identified by user_id.
+           A caregiver cannot resolve another caregiver's resident's emergency.
         """
         if resolver.role != UserRole.CAREGIVER:
             raise UnauthorizedResolutionError(
                 f"User {resolver.id} with role '{resolver.role}' is not authorized to resolve emergencies. "
                 "Only Caregivers can clear active emergencies."
+            )
+
+        if not UserService.is_caregiver_assigned_to_resident(db, caregiver_id=resolver.id, resident_id=user_id):
+            raise UnauthorizedResolutionError(
+                f"Caregiver {resolver.id} is not authorized to resolve emergencies for resident {user_id}. "
+                "Explicit caregiver-to-resident assignment is required."
             )
 
         record = EmergencyService.get_active_emergency(db, user_id)

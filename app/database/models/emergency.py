@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database.base import Base, TimestampMixin
 
@@ -15,8 +15,22 @@ class ActiveEmergency(Base, TimestampMixin):
     Starting a new session, changing operating mode, restarting the host application, or sending
     unrelated messages CANNOT silently clear or reset an active emergency.
     Only an explicit, authorized caregiver resolution procedure can clear it.
+
+    DATABASE CONSTRAINT:
+    The partial unique index `uq_active_emergency_user_unresolved` guarantees at the database
+    engine level that even under high concurrency or race conditions, only ONE active unresolved
+    emergency row can ever exist for a resident.
     """
     __tablename__ = "active_emergencies"
+    __table_args__ = (
+        Index(
+            "uq_active_emergency_user_unresolved",
+            "user_id",
+            unique=True,
+            sqlite_where=text("is_resolved = 0"),
+            postgresql_where=text("is_resolved = false"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(

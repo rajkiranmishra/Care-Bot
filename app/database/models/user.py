@@ -2,7 +2,7 @@
 
 import enum
 from typing import TYPE_CHECKING, Optional
-from sqlalchemy import Boolean, Enum, Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Enum, Float, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database.base import Base, TimestampMixin
 
@@ -133,3 +133,34 @@ class SystemBootstrap(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return f"<SystemBootstrap id={self.id} is_bootstrapped={self.is_bootstrapped} admin_user_id={self.admin_user_id}>"
+
+
+class CaregiverResidentAssignment(Base, TimestampMixin):
+    """Explicit association mapping authorized Caregivers to specific Residents.
+
+    SECURITY INVARIANT:
+    Caregivers do NOT possess ambient authority over every resident.
+    A caregiver can only access, monitor, and resolve emergencies for residents
+    to whom they have been explicitly assigned.
+    """
+    __tablename__ = "caregiver_resident_assignments"
+    __table_args__ = (
+        UniqueConstraint("caregiver_id", "resident_id", name="uq_caregiver_resident"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    caregiver_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    resident_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    def __repr__(self) -> str:
+        return f"<CaregiverResidentAssignment caregiver_id={self.caregiver_id} resident_id={self.resident_id}>"

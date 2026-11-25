@@ -144,7 +144,10 @@ class ConversationEngine:
                 user_affirmation=durable_emergency.user_affirmation,
                 recorded_locally=True,
                 notification_attempted=False,
+                provider_accepted=False,
+                delivery_confirmed=False,
                 notification_delivered=False,
+                caregiver_acknowledged=False,
             )
         elif "active_emergency" in context_data and isinstance(context_data["active_emergency"], dict):
             cached_severity = context_data["active_emergency"].get("severity")
@@ -187,7 +190,10 @@ class ConversationEngine:
                     "user_affirmation": user_utterance,
                     "recorded_locally": True,
                     "notification_attempted": False,
+                    "provider_accepted": False,
+                    "delivery_confirmed": False,
                     "notification_delivered": False,
+                    "caregiver_acknowledged": False,
                 }
             )
 
@@ -255,7 +261,10 @@ class ConversationEngine:
                 pending_resolution=True,
                 recorded_locally=True,
                 notification_attempted=False,
+                provider_accepted=False,
+                delivery_confirmed=False,
                 notification_delivered=False,
+                caregiver_acknowledged=False,
             )
 
         # --- BRANCH B: User Confirmed Safe After Ordinary Uncertain Check ---
@@ -302,7 +311,10 @@ class ConversationEngine:
                 pending_resolution=False,
                 recorded_locally=False,
                 notification_attempted=False,
+                provider_accepted=False,
+                delivery_confirmed=False,
                 notification_delivered=False,
+                caregiver_acknowledged=False,
             )
 
         # --- BRANCH C: New or Repeated CRITICAL / URGENT Emergency ---
@@ -321,7 +333,10 @@ class ConversationEngine:
                 update={
                     "recorded_locally": True,
                     "notification_attempted": False,
+                    "provider_accepted": False,
+                    "delivery_confirmed": False,
                     "notification_delivered": False,
+                    "caregiver_acknowledged": False,
                 }
             )
 
@@ -386,7 +401,10 @@ class ConversationEngine:
                 pending_resolution=False,
                 recorded_locally=True,
                 notification_attempted=False,
+                provider_accepted=False,
+                delivery_confirmed=False,
                 notification_delivered=False,
+                caregiver_acknowledged=False,
             )
 
         # --- BRANCH D: Normal Conversational Flow (LLM Evaluated) ---
@@ -506,5 +524,8 @@ class ConversationEngine:
             pending_resolution=(durable_emergency.status == "pending_resolution" if durable_emergency else False),
             recorded_locally=False,
             notification_attempted=False,
+            provider_accepted=False,
+            delivery_confirmed=False,
             notification_delivered=False,
+            caregiver_acknowledged=False,
         )

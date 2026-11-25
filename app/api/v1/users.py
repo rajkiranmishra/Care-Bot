@@ -29,6 +29,7 @@ from app.users.service import (
     UserConflictError,
     UserNotFoundError,
     UserService,
+    UserServiceError,
 )
 
 router = APIRouter(prefix="/users", tags=["User Management"])
@@ -296,3 +297,51 @@ def lookup_user_by_nfc(
         )
     except UserNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+
+@router.post(
+    "/{resident_id}/caregivers/{caregiver_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Assign an authorized caregiver to a resident",
+)
+def assign_caregiver(
+    resident_id: int,
+    caregiver_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Assign an authorized caregiver to a resident. Only Caregivers can establish assignments."""
+    if current_user.role != UserRole.CAREGIVER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only caregivers can assign caregiver relationships",
+        )
+    try:
+        UserService.assign_caregiver_to_resident(db, caregiver_id=caregiver_id, resident_id=resident_id)
+        return {"status": "assigned", "resident_id": resident_id, "caregiver_id": caregiver_id}
+    except UserNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except UserServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.delete(
+    "/{resident_id}/caregivers/{caregiver_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Remove a caregiver authorization for a resident",
+)
+def remove_caregiver(
+    resident_id: int,
+    caregiver_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Remove a caregiver authorization for a resident. Only Caregivers can revoke assignments."""
+    if current_user.role != UserRole.CAREGIVER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only caregivers can revoke caregiver relationships",
+        )
+    removed = UserService.remove_caregiver_from_resident(db, caregiver_id=caregiver_id, resident_id=resident_id)
+    return {"status": "removed" if removed else "not_found", "resident_id": resident_id, "caregiver_id": caregiver_id}
+

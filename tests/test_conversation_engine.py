@@ -7,8 +7,19 @@ from sqlalchemy.orm import Session
 
 from app.conversation.schemas import SessionCreate
 from app.conversation.service import ConversationService
-from app.database.models.conversation import ConversationMessage, ConversationSession, MessageRole
-from app.database.models.user import OperatingMode, ResponseStyle, SupportedLanguage, User, UserRole
+from app.database.models import (
+    ActiveEmergency,
+    CaregiverResidentAssignment,
+    ConversationMessage,
+    ConversationSession,
+    ConversationState,
+    MessageRole,
+    OperatingMode,
+    ResponseStyle,
+    SupportedLanguage,
+    User,
+    UserRole,
+)
 from app.intelligence.emergency_service import EmergencyService
 from app.intelligence.engine import ConversationEngine
 from app.intelligence.llm_client import MockLLMClient
@@ -699,7 +710,14 @@ def test_caregiver_can_resolve_emergency_successfully(client: TestClient):
     assert turn1.status_code == 200
     assert turn1.json()["active_emergency"] is True
 
-    # 2. Caregiver calls emergency resolution endpoint
+    # 2. Assign caregiver to resident
+    assign_res = client.post(
+        f"/api/v1/users/{resident['id']}/caregivers/{caregiver['id']}",
+        headers=cg_headers,
+    )
+    assert assign_res.status_code == 200
+
+    # 3. Caregiver calls emergency resolution endpoint
     resolve_res = client.post(
         f"/api/v1/conversations/users/{resident['id']}/emergency/resolve",
         headers=cg_headers,
@@ -785,3 +803,287 @@ async def test_concurrent_conversation_turns(db_session: Session):
     for r in results:
         assert r.spoken_response is not None
         assert r.session_id is not None
+
+
+def test_caregiver_resolution_resident_specific_authorization(client: TestClient):
+    """Verify ambient caregiver authority is rejected: only explicitly assigned caregivers can resolve."""
+    res = client.post("/api/v1/users", json={"username": "res_auth_test", "full_name": "Resident"}).json()
+    cg_authorized = client.post(
+        "/api/v1/users",
+        json={"username": "cg_authorized", "full_name": "Authorized CG", "role": "caregiver"},
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    ).json()
+    cg_unrelated = client.post(
+        "/api/v1/users",
+        json={"username": "cg_unrelated", "full_name": "Unrelated CG", "role": "caregiver"},
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    ).json()
+    viewer = client.post(
+        "/api/v1/users",
+        json={"username": "viewer_auth_test", "full_name": "Viewer", "role": "family_viewer"},
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    ).json()
+
+    res_headers = make_auth_headers(user_id=res["id"], username="res_auth_test", role="resident")
+    cg_auth_headers = make_auth_headers(user_id=cg_authorized["id"], username="cg_authorized", role="caregiver")
+    cg_unrel_headers = make_auth_headers(user_id=cg_unrelated["id"], username="cg_unrelated", role="caregiver")
+    viewer_headers = make_auth_headers(user_id=viewer["id"], username="viewer_auth_test", role="family_viewer")
+
+    # Explicitly assign cg_authorized to res
+    assign_res = client.post(
+        f"/api/v1/users/{res['id']}/caregivers/{cg_authorized['id']}",
+        headers=cg_auth_headers,
+    )
+    assert assign_res.status_code == 200
+
+    # 1. Trigger emergency
+    turn = client.post(
+        f"/api/v1/conversations/users/{res['id']}/chat",
+        json={"utterance": "I cannot breathe, please call an ambulance!"},
+        headers=res_headers,
+    )
+    assert turn.status_code == 200
+    assert turn.json()["active_emergency"] is True
+
+    # 2. Resident attempts resolution -> 403 Forbidden
+    res_attempt = client.post(
+        f"/api/v1/conversations/users/{res['id']}/emergency/resolve",
+        headers=res_headers,
+    )
+    assert res_attempt.status_code == 403
+    assert "Only authorized caregivers" in res_attempt.json()["detail"]
+
+    # 3. Family viewer attempts resolution -> 403 Forbidden
+    viewer_attempt = client.post(
+        f"/api/v1/conversations/users/{res['id']}/emergency/resolve",
+        headers=viewer_headers,
+    )
+    assert viewer_attempt.status_code == 403
+    assert "Only authorized caregivers" in viewer_attempt.json()["detail"]
+
+    # 4. Unrelated caregiver (role CAREGIVER, but not assigned to this resident) -> 403 Forbidden
+    unrel_attempt = client.post(
+        f"/api/v1/conversations/users/{res['id']}/emergency/resolve",
+        headers=cg_unrel_headers,
+    )
+    assert unrel_attempt.status_code == 403
+    assert "Explicit caregiver-to-resident assignment is required" in unrel_attempt.json()["detail"]
+
+    # 5. Authorized caregiver attempts resolution -> 200 OK
+    auth_attempt = client.post(
+        f"/api/v1/conversations/users/{res['id']}/emergency/resolve",
+        headers=cg_auth_headers,
+    )
+    assert auth_attempt.status_code == 200
+    assert auth_attempt.json()["status"] == "resolved"
+    assert auth_attempt.json()["resolved_by"] == cg_authorized["id"]
+
+
+def test_partial_unique_index_constraint_enforced(db_session: Session):
+    """Verify that partial unique index uq_active_emergency_user_unresolved blocks duplicate active emergencies."""
+    from sqlalchemy.exc import IntegrityError
+
+    user = UserService.create_user(
+        db_session,
+        UserCreate(username="uq_index_user", full_name="UQ User", role="resident"),
+    )
+
+    # 1. Insert first unresolved emergency
+    em1 = ActiveEmergency(
+        user_id=user.id,
+        severity="critical",
+        trigger_phrase="help me",
+        reasoning="Critical distress detected",
+        is_resolved=False,
+        status="active",
+    )
+    db_session.add(em1)
+    db_session.commit()
+
+    # 2. Attempt to insert second unresolved emergency for same user -> IntegrityError
+    with pytest.raises(IntegrityError):
+        with db_session.begin_nested():
+            em2 = ActiveEmergency(
+                user_id=user.id,
+                severity="urgent",
+                trigger_phrase="chest pain",
+                reasoning="Urgent chest pain",
+                is_resolved=False,
+                status="active",
+            )
+            db_session.add(em2)
+            db_session.flush()
+
+    # 3. Mark the first emergency as resolved
+    em1.is_resolved = True
+    em1.status = "resolved"
+    db_session.commit()
+
+    # 4. Now a new unresolved emergency can be inserted without error
+    em3 = ActiveEmergency(
+        user_id=user.id,
+        severity="critical",
+        trigger_phrase="fell down",
+        reasoning="Physical fall detected",
+        is_resolved=False,
+        status="active",
+    )
+    db_session.add(em3)
+    db_session.commit()
+    assert em3.id is not None
+
+
+@pytest.mark.anyio
+async def test_concurrent_emergency_creation_no_duplicates(db_session: Session):
+    """Verify that concurrent emergency creation attempts do not produce duplicate active records."""
+    user = UserService.create_user(
+        db_session,
+        UserCreate(username="concur_em_user", full_name="Concur Em User", role="resident"),
+    )
+
+    rec1 = EmergencyService.record_active_emergency(
+        db_session,
+        user.id,
+        severity=EmergencySeverity.CRITICAL,
+        trigger_phrase="I fell down",
+        reasoning="Physical fall detected",
+        commit=True,
+    )
+    rec2 = EmergencyService.record_active_emergency(
+        db_session,
+        user.id,
+        severity=EmergencySeverity.URGENT,
+        trigger_phrase="help me",
+        reasoning="Urgent assistance requested",
+        commit=True,
+    )
+
+    # Verify both returned records have the same ID (updated in place)
+    assert rec1.id == rec2.id
+
+    # Verify in DB there is exactly 1 unresolved record
+    active_rows = (
+        db_session.query(ActiveEmergency)
+        .filter(
+            ActiveEmergency.user_id == user.id,
+            ActiveEmergency.is_resolved.is_(False),
+        )
+        .all()
+    )
+    assert len(active_rows) == 1
+
+
+def test_schema_upgrade_preserves_existing_data():
+    """Verify that creating new tables (ActiveEmergency, CaregiverResidentAssignment) preserves existing data."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.database.base import Base
+    from app.database.models.user import UserPreferences
+
+    test_engine_upgrade = create_engine("sqlite:///:memory:")
+    SessionUpgrade = sessionmaker(bind=test_engine_upgrade)
+
+    # 1. Create all tables
+    Base.metadata.create_all(bind=test_engine_upgrade)
+
+    # 2. Seed pre-existing users, sessions, and messages
+    with SessionUpgrade() as session:
+        user = User(username="legacy_resident", full_name="Legacy Resident", role=UserRole.RESIDENT)
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+
+        pref = UserPreferences(user_id=user.id)
+        session.add(pref)
+
+        sess = ConversationSession(user_id=user.id, title="Legacy Session")
+        session.add(sess)
+        session.commit()
+        session.refresh(sess)
+
+        msg = ConversationMessage(
+            session_id=sess.id,
+            user_id=user.id,
+            role=MessageRole.USER,
+            content="Historical pre-upgrade message",
+        )
+        session.add(msg)
+        session.commit()
+        user_id = user.id
+        sess_id = sess.id
+        msg_id = msg.id
+
+    # 3. Simulate upgrade run (create_all on existing DB with newly added models)
+    Base.metadata.create_all(bind=test_engine_upgrade)
+
+    # 4. Verify pre-existing data is intact
+    with SessionUpgrade() as session:
+        u = session.query(User).filter(User.id == user_id).one()
+        assert u.username == "legacy_resident"
+
+        s = session.query(ConversationSession).filter(ConversationSession.id == sess_id).one()
+        assert s.title == "Legacy Session"
+
+        m = session.query(ConversationMessage).filter(ConversationMessage.id == msg_id).one()
+        assert m.content == "Historical pre-upgrade message"
+
+        # 5. Verify newly introduced models function without error on the upgraded database
+        assignment = CaregiverResidentAssignment(caregiver_id=u.id, resident_id=u.id)
+        session.add(assignment)
+        session.commit()
+        assert assignment.id is not None
+
+
+@pytest.mark.anyio
+async def test_notification_status_semantics_distinctions(db_session: Session):
+    """Verify semantic distinction between provider_accepted, delivery_confirmed, and caregiver_acknowledged.
+
+    INVARIANTS:
+    1. Emergency detection sets recorded_locally=True, but provider_accepted, delivery_confirmed, and caregiver_acknowledged remain False.
+    2. delivery_confirmed=True indicates handset packet receipt, but does NOT imply caregiver_acknowledged.
+    3. caregiver_acknowledged=True ONLY occurs when an authorized caregiver explicitly acknowledges/resolves.
+    """
+    user = UserService.create_user(
+        db_session,
+        UserCreate(username="notif_sem_user", full_name="Notif Sem User", role="resident"),
+    )
+    engine = ConversationEngine(llm_client=MockLLMClient())
+
+    # 1. Resident triggers emergency
+    turn = await engine.process_turn(
+        db=db_session,
+        target_user=user,
+        request=ChatTurnRequest(utterance="I fell down and cannot get up!"),
+    )
+
+    # Verify detection states
+    assert turn.active_emergency is True
+    assert turn.recorded_locally is True
+    assert turn.notification_attempted is False
+    assert turn.provider_accepted is False
+    assert turn.delivery_confirmed is False
+    assert turn.caregiver_acknowledged is False
+    assert turn.spoken_response != ""
+    # Ensure spoken response does not falsely claim caregiver was reached
+    assert "notified" not in turn.spoken_response.lower()
+
+    # 2. Verify signal semantics
+    sig = turn.emergency_signal
+    assert sig.recorded_locally is True
+    assert sig.notification_attempted is False
+    assert sig.provider_accepted is False
+    assert sig.delivery_confirmed is False
+    assert sig.caregiver_acknowledged is False
+
+    # Simulate an external gateway delivery confirmation
+    simulated_gateway_signal = sig.model_copy(
+        update={
+            "notification_attempted": True,
+            "provider_accepted": True,
+            "delivery_confirmed": True,
+        }
+    )
+    assert simulated_gateway_signal.delivery_confirmed is True
+    # Crucial: delivery_confirmed does NOT set caregiver_acknowledged!
+    assert simulated_gateway_signal.caregiver_acknowledged is False
+

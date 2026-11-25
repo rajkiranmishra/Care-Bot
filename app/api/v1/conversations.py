@@ -22,7 +22,7 @@ from app.core.context_engine import ContextEngine
 from app.database.models.conversation import MessageRole, SessionStatus
 from app.database.models.user import User, UserRole
 from app.intelligence import ChatTurnRequest, ChatTurnResponse, ConversationEngine
-from app.intelligence.emergency_service import EmergencyService
+from app.intelligence.emergency_service import EmergencyService, UnauthorizedResolutionError
 from app.users.service import UserService, UserNotFoundError
 
 router = APIRouter(prefix="/conversations", tags=["Conversation Context"])
@@ -276,7 +276,11 @@ def resolve_resident_emergency(
     except UserNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
 
-    resolved = EmergencyService.resolve_emergency(db, user_id, current_user)
+    try:
+        resolved = EmergencyService.resolve_emergency(db, user_id, current_user)
+    except UnauthorizedResolutionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+
     if not resolved:
         return {"status": "none_active", "user_id": user_id, "detail": "No active emergency found for resident"}
 

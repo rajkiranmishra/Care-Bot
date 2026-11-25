@@ -75,7 +75,7 @@ CARE-BOT/
 │   ├── services/           # External integrations (weather, adapters)
 │   └── speech/             # Offline STT, TTS & audio streaming (Phase 7)
 │
-└── tests/                  # Automated Pytest Suite (125 Unit & Integration Tests)
+└── tests/                  # Automated Pytest Suite (130 Unit & Integration Tests)
     ├── conftest.py         # In-memory SQLite fixtures, TestClient & auth token helpers
     ├── test_config.py      # Settings, secret validation & environment tests
     ├── test_database.py    # Database connection & transaction tests
@@ -84,7 +84,7 @@ CARE-BOT/
     ├── test_users.py       # User CRUD, operating modes & preferences tests
     ├── test_conversations.py # Session persistence & cross-user isolation tests
     ├── test_context_engine.py # Context synthesis & language prompt tests
-    ├── test_conversation_engine.py # Phase 4.2 ConversationEngine unit & integration tests (26 Tests)
+    ├── test_conversation_engine.py # Phase 4.2 ConversationEngine unit & integration tests (31 Tests)
     ├── test_api/
     │   └── test_health.py  # Health check & diagnostic endpoint tests
     └── test_intelligence/  # Phase 4.1 Intelligence & Emergency Tests (41 Tests)
@@ -143,6 +143,8 @@ The server will start at:
 * `PUT /api/v1/users/{user_id}/preferences`: Update language, speech rate, and accessibility settings.
 * `DELETE /api/v1/users/{user_id}`: Delete user profile and cascade delete sessions.
 * `GET /api/v1/users/lookup/nfc/{nfc_card_id}`: Resolve user identity via hardware NFC card tap (requires `X-Device-Key` or authenticated session; returns minimal non-PII identification payload).
+* `POST /api/v1/users/{resident_id}/caregivers/{caregiver_id}`: Assign an authorized caregiver to a specific resident (Caregiver authorization required).
+* `DELETE /api/v1/users/{resident_id}/caregivers/{caregiver_id}`: Revoke a caregiver authorization for a specific resident (Caregiver authorization required).
 
 ### Conversation Context (`/api/v1/conversations`)
 * `POST /api/v1/conversations/users/{user_id}/sessions`: Create a dialogue session.
@@ -330,12 +332,26 @@ The `ConversationEngine` (`app/intelligence/engine.py`) coordinates multi-turn d
    The engine strictly distinguishes between:
    * **Emergency Detected:** Recognized by deterministic regex/phonetic matcher.
    * **Recorded Locally:** Committed to local database (`recorded_locally: True`).
-   * **Notification Attempted:** External network notification initiated (`notification_attempted: False` in local phase).
-   * **Notification Delivered:** Confirmed received by caregiver or external service (`notification_delivered: False` in local phase).
-   The system NEVER claims that a caregiver is being notified or has been notified unless confirmed by a verified external delivery integration.
-5. **Personal Information Protection (Zero Hallucination):**
+   * **Notification Attempted:** External outbound dispatch initiated to gateway (`notification_attempted: False` in local phase).
+   * **Provider Accepted:** External SMS or push gateway accepted payload (`provider_accepted: False` in local phase).
+   * **Delivery Confirmed:** Recipient device hardware confirmed packet receipt (`delivery_confirmed: False` in local phase). *Crucially, delivery confirmation does NOT imply human caregiver acknowledgment.*
+   * **Caregiver Acknowledged:** An authorized human caregiver explicitly acknowledged or resolved the alert (`caregiver_acknowledged: False` until explicit resolution).
+   The system NEVER claims that a caregiver is being notified or has been notified unless confirmed by verified delivery.
+
+5. **Resident-Specific Caregiver Authorization:**
+   Ambient caregiver authority across all residents is completely eliminated.
+   A caregiver can only access, monitor, or resolve emergencies for residents to whom they have been explicitly assigned via the `caregiver_resident_assignments` database table. An unrelated caregiver attempting resolution is rejected with HTTP 403 Forbidden.
+
+6. **Database Engine Partial Unique Constraint (Concurrency Protection):**
+   A partial unique index `uq_active_emergency_user_unresolved` on `user_id` where `is_resolved = 0` (SQLite) / `is_resolved = false` (PostgreSQL) guarantees at the database engine level that duplicate unresolved active emergency records cannot be inserted, even across multiple Uvicorn worker processes or concurrent race conditions. During simultaneous turn requests, `EmergencyService.record_active_emergency` catches `IntegrityError` to safely reload and update existing records in place.
+
+7. **Database Migration & Existing Data Preservation:**
+   The persistence architecture relies on SQLAlchemy `Base.metadata.create_all`, which executes idempotent, non-destructive `CREATE TABLE IF NOT EXISTS` statements. Adding new tables (`active_emergencies`, `caregiver_resident_assignments`) preserves all pre-existing user profiles, credentials, preferences, sessions, and messages intact without data corruption. Verified via automated regression test `test_schema_upgrade_preserves_existing_data`. (Production deployments requiring destructive schema migrations such as column modifications will incorporate Alembic).
+
+8. **Personal Information Protection (Zero Hallucination):**
    The engine and `MockLLMClient` NEVER invent resident-specific personal data (such as medication names, times, reminders, doctor appointments, or medical history). When verified service integrations are unavailable, the assistant explicitly states that it cannot access the information.
-6. **Zero External Inference Dependencies:**
+
+9. **Zero External Inference Dependencies:**
    Phase 4.2 integrates `MockLLMClient` with deterministic responses, allowing full unit, integration, and end-to-end HTTP testing without requiring Ollama runtime installations, background model daemons, or downloading multi-gigabyte neural weights.
 
 ### 8.3 Authenticated Chat Turn API (`POST /api/v1/conversations/users/{user_id}/chat`)
@@ -443,7 +459,12 @@ curl -X POST http://127.0.0.1:8000/api/v1/conversations/users/1/chat \
 An active critical emergency can **only** be cleared through an authorized caregiver resolution procedure.
 
 * **Endpoint:** `POST /api/v1/conversations/users/{user_id}/emergency/resolve`
-* **Authorization Scope:** Strictly restricted to authenticated users with the `CAREGIVER` role. Residents and Family Viewers receive HTTP 403 Forbidden.
+* **Authorization Scope:** Strictly restricted to authenticated users with the `CAREGIVER` role who have an explicit assignment to the resident identified by `user_id`.
+* **RBAC & Authorization Boundaries:**
+  * **Residents:** Prohibited (HTTP 403 Forbidden).
+  * **Family Viewers:** Prohibited (HTTP 403 Forbidden).
+  * **Unassigned Caregivers:** Prohibited (HTTP 403 Forbidden with `"Explicit caregiver-to-resident assignment is required"`).
+  * **Authorized Caregiver:** Permitted (HTTP 200 OK; marks emergency resolved and clears alert state).
 
 #### Example Caregiver Resolution Request:
 ```bash

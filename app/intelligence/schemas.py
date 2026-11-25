@@ -125,11 +125,23 @@ class EmergencySignal(BaseModel):
     )
     notification_attempted: bool = Field(
         default=False,
-        description="True ONLY if an external notification dispatch was attempted",
+        description="True ONLY if an outbound notification dispatch was attempted to an external gateway",
+    )
+    provider_accepted: bool = Field(
+        default=False,
+        description="True ONLY if an external delivery provider (e.g. SMS gateway or push server) accepted the request",
+    )
+    delivery_confirmed: bool = Field(
+        default=False,
+        description="True ONLY if target recipient hardware device confirmed packet delivery receipt. Does NOT imply human caregiver acknowledgment.",
     )
     notification_delivered: bool = Field(
         default=False,
-        description="True ONLY if external delivery was confirmed by a verified recipient or provider",
+        description="Backward-compatible alias for delivery_confirmed. Does NOT imply caregiver has read or acknowledged the alert.",
+    )
+    caregiver_acknowledged: bool = Field(
+        default=False,
+        description="True ONLY if an authorized human caregiver has explicitly acknowledged or resolved the alert. Never inferred from network delivery.",
     )
     repeat_count: int = Field(
         default=1,
@@ -215,7 +227,10 @@ class ChatTurnResponse(BaseModel):
     pending_resolution: bool = False
     recorded_locally: bool = False
     notification_attempted: bool = False
+    provider_accepted: bool = False
+    delivery_confirmed: bool = False
     notification_delivered: bool = False
+    caregiver_acknowledged: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
