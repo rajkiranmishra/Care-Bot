@@ -104,6 +104,7 @@ class ConversationService:
         user_id: int,
         session_id: str,
         message_in: MessageCreate,
+        commit: bool = True,
     ) -> ConversationMessage:
         """Append an utterance or response to a session with user ownership validation."""
         session = ConversationService.get_session(db, user_id, session_id)
@@ -120,8 +121,9 @@ class ConversationService:
 
         # Advance session timestamp
         session.status = SessionStatus.ACTIVE
-        db.commit()
-        db.refresh(message)
+        if commit:
+            db.commit()
+            db.refresh(message)
         return message
 
     @staticmethod

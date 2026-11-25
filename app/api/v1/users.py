@@ -29,6 +29,7 @@ from app.users.service import (
     UserConflictError,
     UserNotFoundError,
     UserService,
+    UserServiceError,
 )
 
 router = APIRouter(prefix="/users", tags=["User Management"])
@@ -180,7 +181,7 @@ def get_user(
     db: Session = Depends(get_db),
 ) -> UserResponse:
     """Retrieve complete user profile and preferences with ownership verification."""
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
     try:
         user = UserService.get_by_id(db, user_id)
         return UserResponse.model_validate(user)
@@ -200,7 +201,7 @@ def update_user(
     db: Session = Depends(get_db),
 ) -> UserResponse:
     """Update profile and switch operating mode. Family viewers are restricted."""
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
 
     if current_user.role == UserRole.FAMILY_VIEWER:
         raise HTTPException(
@@ -229,7 +230,7 @@ def update_user_preferences(
     db: Session = Depends(get_db),
 ) -> UserPreferencesResponse:
     """Update interaction preferences. Family viewers are restricted."""
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
 
     if current_user.role == UserRole.FAMILY_VIEWER:
         raise HTTPException(
@@ -255,7 +256,7 @@ def delete_user(
     db: Session = Depends(get_db),
 ) -> None:
     """Delete a user profile. Family viewers are restricted."""
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
 
     if current_user.role == UserRole.FAMILY_VIEWER:
         raise HTTPException(
@@ -296,3 +297,136 @@ def lookup_user_by_nfc(
         )
     except UserNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+
+@router.post(
+    "/{resident_id}/caregivers/{caregiver_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Assign an authorized caregiver to a resident",
+)
+def assign_caregiver(
+    resident_id: int,
+    caregiver_id: int,
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    x_device_key: Optional[str] = Header(None, alias="X-Device-Key"),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """Assign an authorized caregiver to a resident.
+
+    SECURITY RULE (Assignment Authorization & Anti-Self-Assignment):
+    A caregiver must NOT be able to assign themselves to arbitrary residents.
+    Only the following actors are authorized to assign a caregiver to a resident:
+    1. Authorized hardware device administrator (valid X-Device-Key).
+    2. The resident themselves (current_user.id == resident_id).
+    3. The primary system bootstrap administrator (SystemBootstrap.admin_user_id == current_user.id).
+    4. An existing caregiver already assigned to this resident (for delegating to a co-caregiver).
+    """
+    is_device_admin = bool(
+        x_device_key
+        and settings.DEVICE_API_KEY
+        and hmac.compare_digest(x_device_key, settings.DEVICE_API_KEY)
+    )
+
+    if not is_device_admin:
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required",
+            )
+
+        is_target_resident = current_user.id == resident_id and current_user.role == UserRole.RESIDENT
+        is_primary_admin = (
+            db.query(SystemBootstrap)
+            .filter(SystemBootstrap.admin_user_id == current_user.id)
+            .first()
+            is not None
+        )
+        is_existing_assigned_caregiver = (
+            current_user.role == UserRole.CAREGIVER
+            and UserService.is_caregiver_assigned_to_resident(
+                db, caregiver_id=current_user.id, resident_id=resident_id
+            )
+        )
+
+        # Anti-self-assignment check: a caregiver cannot assign themselves without device admin, resident, or primary admin authority
+        if current_user.id == caregiver_id and not (is_primary_admin or is_target_resident):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Caregivers cannot assign themselves to residents without administrative or resident authorization",
+            )
+
+        if not (is_target_resident or is_primary_admin or is_existing_assigned_caregiver):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to assign caregivers for this resident",
+            )
+
+    try:
+        UserService.assign_caregiver_to_resident(db, caregiver_id=caregiver_id, resident_id=resident_id)
+        return {"status": "assigned", "resident_id": resident_id, "caregiver_id": caregiver_id}
+    except UserNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except UserServiceError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@router.delete(
+    "/{resident_id}/caregivers/{caregiver_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Remove a caregiver authorization for a resident",
+)
+def remove_caregiver(
+    resident_id: int,
+    caregiver_id: int,
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    x_device_key: Optional[str] = Header(None, alias="X-Device-Key"),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """Remove a caregiver authorization for a resident.
+
+    SECURITY RULE:
+    Only authorized actors may revoke caregiver assignments:
+    1. Authorized hardware device administrator (valid X-Device-Key).
+    2. The resident themselves (current_user.id == resident_id).
+    3. The primary system bootstrap administrator.
+    4. An existing assigned caregiver for this resident, or the caregiver removing their own assignment.
+    """
+    is_device_admin = bool(
+        x_device_key
+        and settings.DEVICE_API_KEY
+        and hmac.compare_digest(x_device_key, settings.DEVICE_API_KEY)
+    )
+
+    if not is_device_admin:
+        if not current_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required",
+            )
+
+        is_target_resident = current_user.id == resident_id and current_user.role == UserRole.RESIDENT
+        is_primary_admin = (
+            db.query(SystemBootstrap)
+            .filter(SystemBootstrap.admin_user_id == current_user.id)
+            .first()
+            is not None
+        )
+        is_assigned_caregiver = (
+            current_user.role == UserRole.CAREGIVER
+            and UserService.is_caregiver_assigned_to_resident(
+                db, caregiver_id=current_user.id, resident_id=resident_id
+            )
+        )
+        is_self_removal = current_user.id == caregiver_id
+
+        if not (is_target_resident or is_primary_admin or is_assigned_caregiver or is_self_removal):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to revoke caregiver assignments for this resident",
+            )
+
+    removed = UserService.remove_caregiver_from_resident(db, caregiver_id=caregiver_id, resident_id=resident_id)
+    return {"status": "removed" if removed else "not_found", "resident_id": resident_id, "caregiver_id": caregiver_id}
+

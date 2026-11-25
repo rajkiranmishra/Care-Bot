@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
 from app.database.models.user import (
+    CaregiverResidentAssignment,
     OperatingMode,
     ResponseStyle,
     SupportedLanguage,
@@ -209,3 +210,83 @@ class UserService:
         user = UserService.get_by_id(db, user_id)
         db.delete(user)
         db.commit()
+
+    @staticmethod
+    def assign_caregiver_to_resident(
+        db: Session,
+        caregiver_id: int,
+        resident_id: int,
+    ) -> CaregiverResidentAssignment:
+        """Explicitly authorize a Caregiver for a specific Resident."""
+        caregiver = UserService.get_by_id(db, caregiver_id)
+        resident = UserService.get_by_id(db, resident_id)
+
+        if caregiver.role != UserRole.CAREGIVER:
+            raise UserServiceError(f"User {caregiver_id} does not have the CAREGIVER role")
+        if resident.role != UserRole.RESIDENT:
+            raise UserServiceError(f"User {resident_id} is not a RESIDENT")
+
+        existing = db.execute(
+            select(CaregiverResidentAssignment).where(
+                CaregiverResidentAssignment.caregiver_id == caregiver_id,
+                CaregiverResidentAssignment.resident_id == resident_id,
+            )
+        ).scalar_one_or_none()
+        if existing:
+            return existing
+
+        assignment = CaregiverResidentAssignment(
+            caregiver_id=caregiver_id,
+            resident_id=resident_id,
+        )
+        db.add(assignment)
+        db.commit()
+        db.refresh(assignment)
+        return assignment
+
+    @staticmethod
+    def remove_caregiver_from_resident(
+        db: Session,
+        caregiver_id: int,
+        resident_id: int,
+    ) -> bool:
+        """Revoke a Caregiver's authorization for a specific Resident."""
+        assignment = db.execute(
+            select(CaregiverResidentAssignment).where(
+                CaregiverResidentAssignment.caregiver_id == caregiver_id,
+                CaregiverResidentAssignment.resident_id == resident_id,
+            )
+        ).scalar_one_or_none()
+        if not assignment:
+            return False
+        db.delete(assignment)
+        db.commit()
+        return True
+
+    @staticmethod
+    def is_caregiver_assigned_to_resident(
+        db: Session,
+        caregiver_id: int,
+        resident_id: int,
+    ) -> bool:
+        """Verify whether a Caregiver is explicitly authorized for a Resident."""
+        assignment = db.execute(
+            select(CaregiverResidentAssignment).where(
+                CaregiverResidentAssignment.caregiver_id == caregiver_id,
+                CaregiverResidentAssignment.resident_id == resident_id,
+            )
+        ).scalar_one_or_none()
+        return assignment is not None
+
+    @staticmethod
+    def list_assigned_residents_for_caregiver(
+        db: Session,
+        caregiver_id: int,
+    ) -> List[int]:
+        """List all resident user IDs assigned to a specific caregiver."""
+        rows = db.execute(
+            select(CaregiverResidentAssignment.resident_id).where(
+                CaregiverResidentAssignment.caregiver_id == caregiver_id
+            )
+        ).scalars().all()
+        return list(rows)

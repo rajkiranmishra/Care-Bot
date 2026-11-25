@@ -69,8 +69,9 @@ def test_cross_user_access_prevented(client: TestClient):
 
 
 def test_caregiver_can_access_resident_profile(client: TestClient):
-    """Verify that an authorized Caregiver role can view and manage a resident's profile."""
+    """Verify that only an assigned Caregiver role can view and manage a resident's profile."""
     resident = client.post("/api/v1/users", json={"username": "sarah_res", "full_name": "Sarah"}).json()
+    unrelated_res = client.post("/api/v1/users", json={"username": "other_res", "full_name": "Other Resident"}).json()
     caregiver = client.post(
         "/api/v1/users",
         json={"username": "carol_care", "full_name": "Carol", "role": "caregiver"},
@@ -79,12 +80,33 @@ def test_caregiver_can_access_resident_profile(client: TestClient):
 
     caregiver_headers = make_auth_headers(user_id=caregiver["id"], username="carol_care", role="caregiver")
 
-    # Caregiver reads resident profile
+    # 1. Unassigned caregiver tries to read resident profile -> 403 Forbidden
+    get_unassigned = client.get(f"/api/v1/users/{resident['id']}", headers=caregiver_headers)
+    assert get_unassigned.status_code == 403
+    assert "not assigned" in get_unassigned.json()["detail"]
+
+    # 2. Unassigned caregiver tries to update resident preferences -> 403 Forbidden
+    put_unassigned = client.put(
+        f"/api/v1/users/{resident['id']}/preferences",
+        json={"preferred_language": "bn"},
+        headers=caregiver_headers,
+    )
+    assert put_unassigned.status_code == 403
+    assert "not assigned" in put_unassigned.json()["detail"]
+
+    # 3. Assign caregiver to resident
+    assign_res = client.post(
+        f"/api/v1/users/{resident['id']}/caregivers/{caregiver['id']}",
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    )
+    assert assign_res.status_code == 200
+
+    # 4. Assigned caregiver reads resident profile -> 200 OK
     get_res = client.get(f"/api/v1/users/{resident['id']}", headers=caregiver_headers)
     assert get_res.status_code == 200
     assert get_res.json()["username"] == "sarah_res"
 
-    # Caregiver updates resident preferences
+    # 5. Assigned caregiver updates resident preferences -> 200 OK
     update_res = client.put(
         f"/api/v1/users/{resident['id']}/preferences",
         json={"preferred_language": "bn"},
@@ -92,6 +114,72 @@ def test_caregiver_can_access_resident_profile(client: TestClient):
     )
     assert update_res.status_code == 200
     assert update_res.json()["preferred_language"] == "bn"
+
+    # 6. Assigned caregiver CANNOT access unrelated resident -> 403 Forbidden
+    unrelated_get = client.get(f"/api/v1/users/{unrelated_res['id']}", headers=caregiver_headers)
+    assert unrelated_get.status_code == 403
+    assert "not assigned" in unrelated_get.json()["detail"]
+
+
+def test_unassigned_caregiver_cannot_access_context_or_conversations(client: TestClient):
+    """Verify that an unassigned caregiver cannot access another resident's context, sessions, or messages."""
+    resident = client.post("/api/v1/users", json={"username": "res_iso_1", "full_name": "Resident Iso"}).json()
+    caregiver = client.post(
+        "/api/v1/users",
+        json={"username": "cg_unassigned_iso", "full_name": "Unassigned CG", "role": "caregiver"},
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    ).json()
+
+    res_headers = make_auth_headers(user_id=resident["id"], username="res_iso_1", role="resident")
+    cg_headers = make_auth_headers(user_id=caregiver["id"], username="cg_unassigned_iso", role="caregiver")
+
+    # Resident creates a session and message
+    sess = client.post(
+        f"/api/v1/conversations/users/{resident['id']}/sessions",
+        json={"title": "Private Chat"},
+        headers=res_headers,
+    ).json()
+    client.post(
+        f"/api/v1/conversations/users/{resident['id']}/sessions/{sess['id']}/messages",
+        json={"content": "Confidential health conversation", "role": "user"},
+        headers=res_headers,
+    )
+
+    # 1. Unassigned caregiver tries to retrieve resident context -> 403 Forbidden
+    ctx_res = client.get(
+        f"/api/v1/conversations/users/{resident['id']}/context",
+        headers=cg_headers,
+    )
+    assert ctx_res.status_code == 403
+    assert "not assigned" in ctx_res.json()["detail"]
+
+    # 2. Unassigned caregiver tries to list resident sessions -> 403 Forbidden
+    list_sess_res = client.get(
+        f"/api/v1/conversations/users/{resident['id']}/sessions",
+        headers=cg_headers,
+    )
+    assert list_sess_res.status_code == 403
+    assert "not assigned" in list_sess_res.json()["detail"]
+
+    # 3. Unassigned caregiver tries to retrieve resident session messages -> 403 Forbidden
+    msg_res = client.get(
+        f"/api/v1/conversations/users/{resident['id']}/sessions/{sess['id']}/messages",
+        headers=cg_headers,
+    )
+    assert msg_res.status_code == 403
+    assert "not assigned" in msg_res.json()["detail"]
+
+    # 4. Now assign the caregiver to this resident
+    assign_res = client.post(
+        f"/api/v1/users/{resident['id']}/caregivers/{caregiver['id']}",
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    )
+    assert assign_res.status_code == 200
+
+    # 5. Assigned caregiver can now access context, sessions, and messages -> 200 OK
+    assert client.get(f"/api/v1/conversations/users/{resident['id']}/context", headers=cg_headers).status_code == 200
+    assert client.get(f"/api/v1/conversations/users/{resident['id']}/sessions", headers=cg_headers).status_code == 200
+    assert client.get(f"/api/v1/conversations/users/{resident['id']}/sessions/{sess['id']}/messages", headers=cg_headers).status_code == 200
 
 
 def test_family_viewer_read_only_enforcement(client: TestClient):

@@ -43,7 +43,7 @@ secrets/
 *.safetensors
 *.pt
 *.pth
-models/
+/models/
 weights/
 
 # Audio files, recordings & cache
