@@ -1,11 +1,15 @@
 """Comprehensive unit and integration tests for ConversationEngine orchestration."""
 
+import asyncio
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.conversation.schemas import SessionCreate
+from app.conversation.service import ConversationService
 from app.database.models.conversation import ConversationMessage, ConversationSession, MessageRole
 from app.database.models.user import OperatingMode, ResponseStyle, SupportedLanguage, User, UserRole
+from app.intelligence.emergency_service import EmergencyService
 from app.intelligence.engine import ConversationEngine
 from app.intelligence.llm_client import MockLLMClient
 from app.intelligence.schemas import (
@@ -14,7 +18,7 @@ from app.intelligence.schemas import (
     EmergencySeverity,
     IntentType,
 )
-from app.users.schemas import UserCreate
+from app.users.schemas import UserCreate, UserUpdate
 from app.users.service import UserService
 from tests.conftest import TEST_DEVICE_KEY, make_auth_headers
 
@@ -171,9 +175,15 @@ async def test_engine_emergency_fast_path_bypasses_llm(db_session: Session):
     # 2. LLM was NEVER called during emergency fast path
     assert len(mock_llm.calls) == 0
 
-    # 3. Truthful response: acknowledges detection without falsely claiming live 911 dispatch
-    assert "Emergency signal registered" in res.spoken_response
-    assert "Emergency alert prioritized" in res.spoken_response
+    # 3. Truthful response: acknowledges detection without falsely claiming notification delivery
+    assert "Emergency signal registered locally" in res.spoken_response
+    assert "External notification has not been dispatched" in res.spoken_response
+    assert "notifying your caregiver" not in res.spoken_response.lower()
+    assert "caregiver has been notified" not in res.spoken_response.lower()
+    assert res.emergency_signal.detected is True
+    assert res.recorded_locally is True
+    assert res.notification_attempted is False
+    assert res.notification_delivered is False
 
 
 @pytest.mark.anyio
@@ -402,3 +412,376 @@ def test_api_chat_turn_emergency_endpoint_fast_path(client: TestClient):
     assert data["emergency_signal"]["severity"] == "critical"
     assert data["proposed_action"]["action_type"] == "trigger_emergency_alert"
     assert data["active_emergency"] is True
+
+
+# -----------------------------------------------------------------------------
+# Regression Tests: Emergency Honesty, MockLLM Truthfulness, Persistence & Integrity
+# -----------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_emergency_honesty_distinctions(db_session: Session):
+    """Verify system strictly distinguishes detected vs recorded locally vs notification attempted vs delivered."""
+    user = UserService.create_user(
+        db_session,
+        UserCreate(username="honesty_user", full_name="Honesty User", role="resident"),
+    )
+    engine = ConversationEngine(llm_client=MockLLMClient())
+
+    res = await engine.process_turn(
+        db_session,
+        user,
+        ChatTurnRequest(utterance="I fell and I can't move my arm"),
+    )
+
+    # 1. State distinctions
+    assert res.emergency_signal.detected is True
+    assert res.recorded_locally is True
+    assert res.notification_attempted is False
+    assert res.notification_delivered is False
+
+    # 2. Honest spoken communication
+    assert "notifying your caregiver" not in res.spoken_response.lower()
+    assert "caregiver has been notified" not in res.spoken_response.lower()
+    assert "External notification has not been dispatched" in res.spoken_response
+
+
+@pytest.mark.anyio
+async def test_mock_llm_refuses_to_invent_medications(db_session: Session):
+    """Verify MockLLMClient and engine refuse to invent medication names, schedules, or doses."""
+    user = UserService.create_user(
+        db_session,
+        UserCreate(username="med_query_user", full_name="Med Query User", role="resident"),
+    )
+    # Generic MockLLMClient with no canned or hardcoded responses
+    engine = ConversationEngine(llm_client=MockLLMClient())
+
+    res = await engine.process_turn(
+        db_session,
+        user,
+        ChatTurnRequest(utterance="What medications do I have scheduled for this morning?"),
+    )
+
+    # Must honestly report lack of access rather than fabricating drugs or times
+    assert "do not have access to your medication schedule" in res.spoken_response
+    assert "blood pressure" not in res.spoken_response.lower()
+    assert "9:00" not in res.spoken_response
+    assert res.proposed_action.action_type == ActionType.NONE
+
+
+@pytest.mark.anyio
+async def test_mock_llm_refuses_to_invent_reminders(db_session: Session):
+    """Verify MockLLMClient and engine refuse to invent reminders or daily agenda."""
+    user = UserService.create_user(
+        db_session,
+        UserCreate(username="reminder_query_user", full_name="Reminder User", role="resident"),
+    )
+    engine = ConversationEngine(llm_client=MockLLMClient())
+
+    res = await engine.process_turn(
+        db_session,
+        user,
+        ChatTurnRequest(utterance="What are my reminders for today?"),
+    )
+
+    assert "cannot access your reminders or schedule" in res.spoken_response
+    assert res.proposed_action.action_type == ActionType.NONE
+
+
+@pytest.mark.anyio
+async def test_mock_llm_refuses_to_invent_doctor_appointments(db_session: Session):
+    """Verify MockLLMClient and engine refuse to invent appointment schedules or medical history."""
+    user = UserService.create_user(
+        db_session,
+        UserCreate(username="appt_user", full_name="Appt User", role="resident"),
+    )
+    engine = ConversationEngine(llm_client=MockLLMClient())
+
+    res = await engine.process_turn(
+        db_session,
+        user,
+        ChatTurnRequest(utterance="When is my next doctor appointment?"),
+    )
+
+    assert "do not have access to your appointment schedule" in res.spoken_response
+    assert res.proposed_action.action_type == ActionType.NONE
+
+
+@pytest.mark.anyio
+async def test_emergency_persists_across_new_conversation_session(db_session: Session):
+    """Verify active emergency remains active when a resident starts a new conversation session."""
+    user = UserService.create_user(
+        db_session,
+        UserCreate(username="session_persist_user", full_name="Session Persist", role="resident"),
+    )
+    engine = ConversationEngine(llm_client=MockLLMClient())
+
+    # Turn 1: Emergency in session 1
+    t1 = await engine.process_turn(
+        db_session,
+        user,
+        ChatTurnRequest(utterance="I fell down and cannot get up!"),
+    )
+    assert t1.active_emergency is True
+    session1_id = t1.session_id
+
+    # Create a completely new session explicitly
+    new_session = ConversationService.create_session(
+        db_session,
+        user.id,
+        SessionCreate(title="Brand New Session"),
+    )
+    assert new_session.id != session1_id
+
+    # Turn 2: User talks in the new session
+    t2 = await engine.process_turn(
+        db_session,
+        user,
+        ChatTurnRequest(utterance="Hello in new session", session_id=new_session.id),
+    )
+    # The active emergency must still be reported as active!
+    assert t2.active_emergency is True
+
+
+@pytest.mark.anyio
+async def test_emergency_persists_across_operating_mode_change(db_session: Session):
+    """Verify active emergency remains active even if user switches operating mode."""
+    user = UserService.create_user(
+        db_session,
+        UserCreate(
+            username="mode_change_user",
+            full_name="Mode Change",
+            role="resident",
+            operating_mode=OperatingMode.ELDERLY_CARE,
+        ),
+    )
+    engine = ConversationEngine(llm_client=MockLLMClient())
+
+    # Turn 1: Trigger emergency
+    t1 = await engine.process_turn(
+        db_session,
+        user,
+        ChatTurnRequest(utterance="I fell down and cannot get up!"),
+    )
+    assert t1.active_emergency is True
+
+    # Switch operating mode to WORKING_PROFESSIONAL
+    UserService.update_user(db_session, user.id, UserUpdate(operating_mode=OperatingMode.WORKING_PROFESSIONAL))
+    user_updated = UserService.get_by_id(db_session, user.id)
+    assert user_updated.operating_mode == OperatingMode.WORKING_PROFESSIONAL
+
+    # Turn 2: Subsequent chat turn
+    t2 = await engine.process_turn(
+        db_session,
+        user_updated,
+        ChatTurnRequest(utterance="What is on my calendar?", session_id=t1.session_id),
+    )
+    assert t2.active_emergency is True
+
+
+@pytest.mark.anyio
+async def test_emergency_persists_across_application_restart(db_session: Session):
+    """Verify emergency persists in the database across application restarts / engine re-initialization."""
+    user = UserService.create_user(
+        db_session,
+        UserCreate(username="restart_user", full_name="Restart User", role="resident"),
+    )
+    engine = ConversationEngine(llm_client=MockLLMClient())
+
+    # Turn 1: Trigger emergency
+    t1 = await engine.process_turn(
+        db_session,
+        user,
+        ChatTurnRequest(utterance="I fell down and cannot get up!"),
+    )
+    assert t1.active_emergency is True
+
+    # Verify durable record exists in active_emergencies table
+    record = EmergencyService.get_active_emergency(db_session, user.id)
+    assert record is not None
+    assert record.is_resolved is False
+    assert record.severity == "critical"
+
+    # Simulate restart by instantiating a completely fresh ConversationEngine
+    fresh_engine = ConversationEngine(llm_client=MockLLMClient())
+
+    # Turn 2: User says "I am fine" after restart
+    t2 = await fresh_engine.process_turn(
+        db_session,
+        user,
+        ChatTurnRequest(utterance="I am fine, don't worry"),
+    )
+    # Must preserve pending resolution without clearing the emergency!
+    assert t2.active_emergency is True
+    assert t2.pending_resolution is True
+
+
+@pytest.mark.anyio
+async def test_emergency_persists_across_subsequent_chat_messages(db_session: Session):
+    """Verify sending an ordinary conversational message does NOT silently clear an active emergency."""
+    user = UserService.create_user(
+        db_session,
+        UserCreate(username="subsequent_msg_user", full_name="Subsequent User", role="resident"),
+    )
+    engine = ConversationEngine(llm_client=MockLLMClient())
+
+    # Turn 1: Trigger emergency
+    t1 = await engine.process_turn(
+        db_session,
+        user,
+        ChatTurnRequest(utterance="I fell down and can't get up!"),
+    )
+    assert t1.active_emergency is True
+
+    # Turn 2: Unrelated general query
+    t2 = await engine.process_turn(
+        db_session,
+        user,
+        ChatTurnRequest(utterance="What is the capital of France?", session_id=t1.session_id),
+    )
+    # The active emergency remains active!
+    assert t2.active_emergency is True
+
+
+def test_resident_and_viewer_cannot_resolve_emergency(client: TestClient):
+    """Verify residents and family viewers cannot resolve emergencies (403 Forbidden)."""
+    resident = client.post("/api/v1/users", json={"username": "res_resolve_fail", "full_name": "Resident"}).json()
+    viewer = client.post(
+        "/api/v1/users",
+        json={"username": "viewer_resolve_fail", "full_name": "Viewer", "role": "family_viewer"},
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    ).json()
+
+    res_headers = make_auth_headers(user_id=resident["id"], username="res_resolve_fail", role="resident")
+    viewer_headers = make_auth_headers(user_id=viewer["id"], username="viewer_resolve_fail", role="family_viewer")
+
+    # Resident triggers emergency via chat
+    client.post(
+        f"/api/v1/conversations/users/{resident['id']}/chat",
+        json={"utterance": "I fell down and cannot get up, help!"},
+        headers=res_headers,
+    )
+
+    # Resident attempts to resolve emergency -> 403 Forbidden
+    res_attempt = client.post(
+        f"/api/v1/conversations/users/{resident['id']}/emergency/resolve",
+        headers=res_headers,
+    )
+    assert res_attempt.status_code == 403
+    assert "Only authorized caregivers" in res_attempt.json()["detail"]
+
+    # Family Viewer attempts to resolve emergency -> 403 Forbidden
+    viewer_attempt = client.post(
+        f"/api/v1/conversations/users/{resident['id']}/emergency/resolve",
+        headers=viewer_headers,
+    )
+    assert viewer_attempt.status_code == 403
+    assert "Only authorized caregivers" in viewer_attempt.json()["detail"]
+
+
+def test_caregiver_can_resolve_emergency_successfully(client: TestClient):
+    """Verify authorized caregiver resolves active emergency and clears alert state."""
+    resident = client.post("/api/v1/users", json={"username": "res_resolved_ok", "full_name": "Resident"}).json()
+    caregiver = client.post(
+        "/api/v1/users",
+        json={"username": "caregiver_resolver", "full_name": "Caregiver Resolver", "role": "caregiver"},
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    ).json()
+
+    res_headers = make_auth_headers(user_id=resident["id"], username="res_resolved_ok", role="resident")
+    cg_headers = make_auth_headers(user_id=caregiver["id"], username="caregiver_resolver", role="caregiver")
+
+    # 1. Resident triggers emergency
+    turn1 = client.post(
+        f"/api/v1/conversations/users/{resident['id']}/chat",
+        json={"utterance": "I fell down and cannot get up!"},
+        headers=res_headers,
+    )
+    assert turn1.status_code == 200
+    assert turn1.json()["active_emergency"] is True
+
+    # 2. Caregiver calls emergency resolution endpoint
+    resolve_res = client.post(
+        f"/api/v1/conversations/users/{resident['id']}/emergency/resolve",
+        headers=cg_headers,
+    )
+    assert resolve_res.status_code == 200
+    resolve_data = resolve_res.json()
+    assert resolve_data["status"] == "resolved"
+    assert resolve_data["resolved_by"] == caregiver["id"]
+
+    # 3. Subsequent chat turn shows active_emergency is cleared
+    turn2 = client.post(
+        f"/api/v1/conversations/users/{resident['id']}/chat",
+        json={"utterance": "Hello again"},
+        headers=res_headers,
+    )
+    assert turn2.status_code == 200
+    assert turn2.json()["active_emergency"] is False
+
+
+@pytest.mark.anyio
+async def test_database_failure_during_message_persistence_rolls_back(db_session: Session, monkeypatch):
+    """Verify that a database error during message persistence rolls back the entire turn transaction."""
+    user = UserService.create_user(
+        db_session,
+        UserCreate(username="rollback_user", full_name="Rollback User", role="resident"),
+    )
+    engine = ConversationEngine(llm_client=MockLLMClient())
+
+    # Get active session and store ID
+    session = ConversationService.get_or_create_active_session(db_session, user.id)
+    session_id = session.id
+    user_id = user.id
+
+    # Monkeypatch ConversationService.add_message to fail on assistant message
+    original_add_message = ConversationService.add_message
+    call_count = 0
+
+    def mock_failing_add_message(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("Simulated database failure during assistant message persistence")
+        return original_add_message(*args, **kwargs)
+
+    monkeypatch.setattr(ConversationService, "add_message", mock_failing_add_message)
+
+    with pytest.raises(RuntimeError, match="Simulated database failure"):
+        await engine.process_turn(
+            db_session,
+            user,
+            ChatTurnRequest(utterance="This should fail atomically", session_id=session_id),
+        )
+
+    # Verify that NO messages were committed for this user
+    messages = (
+        db_session.query(ConversationMessage)
+        .filter(ConversationMessage.user_id == user_id)
+        .all()
+    )
+    assert len(messages) == 0
+
+
+@pytest.mark.anyio
+async def test_concurrent_conversation_turns(db_session: Session):
+    """Verify concurrent chat turn requests for a user execute safely without state corruption."""
+    user = UserService.create_user(
+        db_session,
+        UserCreate(username="concurrent_user", full_name="Concurrent User", role="resident"),
+    )
+    engine = ConversationEngine(llm_client=MockLLMClient())
+
+    async def execute_turn(text: str):
+        return await engine.process_turn(db_session, user, ChatTurnRequest(utterance=text))
+
+    # Run 3 concurrent turns
+    results = await asyncio.gather(
+        execute_turn("Concurrent turn one"),
+        execute_turn("Concurrent turn two"),
+        execute_turn("Concurrent turn three"),
+    )
+
+    assert len(results) == 3
+    for r in results:
+        assert r.spoken_response is not None
+        assert r.session_id is not None

@@ -22,6 +22,7 @@ from app.core.context_engine import ContextEngine
 from app.database.models.conversation import MessageRole, SessionStatus
 from app.database.models.user import User, UserRole
 from app.intelligence import ChatTurnRequest, ChatTurnResponse, ConversationEngine
+from app.intelligence.emergency_service import EmergencyService
 from app.users.service import UserService, UserNotFoundError
 
 router = APIRouter(prefix="/conversations", tags=["Conversation Context"])
@@ -247,4 +248,44 @@ async def chat_turn(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     except SessionAccessDeniedError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+
+
+@router.post(
+    "/users/{user_id}/emergency/resolve",
+    summary="Resolve an active emergency for a resident (Caregiver only)",
+)
+def resolve_resident_emergency(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Execute authorized caregiver resolution procedure to clear an active emergency.
+
+    SECURITY RULE:
+    Only authenticated Caregivers can resolve an active emergency.
+    Residents and Family Viewers are strictly prohibited (403 Forbidden).
+    """
+    if current_user.role != UserRole.CAREGIVER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only authorized caregivers can resolve emergencies",
+        )
+
+    try:
+        UserService.get_by_id(db, user_id)
+    except UserNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+    resolved = EmergencyService.resolve_emergency(db, user_id, current_user)
+    if not resolved:
+        return {"status": "none_active", "user_id": user_id, "detail": "No active emergency found for resident"}
+
+    return {
+        "status": "resolved",
+        "emergency_id": resolved.id,
+        "user_id": user_id,
+        "severity": resolved.severity,
+        "resolved_by": current_user.id,
+        "resolved_at": resolved.resolved_at.isoformat() if resolved.resolved_at else None,
+    }
 

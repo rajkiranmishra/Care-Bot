@@ -119,6 +119,18 @@ class EmergencySignal(BaseModel):
         default=False,
         description="True when an affirmative statement was spoken during an active CRITICAL emergency, requiring authorized caregiver clearance",
     )
+    recorded_locally: bool = Field(
+        default=False,
+        description="True once the emergency is committed to the local database store",
+    )
+    notification_attempted: bool = Field(
+        default=False,
+        description="True ONLY if an external notification dispatch was attempted",
+    )
+    notification_delivered: bool = Field(
+        default=False,
+        description="True ONLY if external delivery was confirmed by a verified recipient or provider",
+    )
     repeat_count: int = Field(
         default=1,
         ge=1,
@@ -201,6 +213,9 @@ class ChatTurnResponse(BaseModel):
     session_state: str
     active_emergency: bool = False
     pending_resolution: bool = False
+    recorded_locally: bool = False
+    notification_attempted: bool = False
+    notification_delivered: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -75,7 +75,7 @@ CARE-BOT/
 │   ├── services/           # External integrations (weather, adapters)
 │   └── speech/             # Offline STT, TTS & audio streaming (Phase 7)
 │
-└── tests/                  # Automated Pytest Suite (113 Unit & Integration Tests)
+└── tests/                  # Automated Pytest Suite (125 Unit & Integration Tests)
     ├── conftest.py         # In-memory SQLite fixtures, TestClient & auth token helpers
     ├── test_config.py      # Settings, secret validation & environment tests
     ├── test_database.py    # Database connection & transaction tests
@@ -84,7 +84,7 @@ CARE-BOT/
     ├── test_users.py       # User CRUD, operating modes & preferences tests
     ├── test_conversations.py # Session persistence & cross-user isolation tests
     ├── test_context_engine.py # Context synthesis & language prompt tests
-    ├── test_conversation_engine.py # Phase 4.2 ConversationEngine unit & integration tests (14 Tests)
+    ├── test_conversation_engine.py # Phase 4.2 ConversationEngine unit & integration tests (26 Tests)
     ├── test_api/
     │   └── test_health.py  # Health check & diagnostic endpoint tests
     └── test_intelligence/  # Phase 4.1 Intelligence & Emergency Tests (41 Tests)
@@ -153,6 +153,7 @@ The server will start at:
 * `GET /api/v1/conversations/users/{user_id}/sessions/{session_id}/messages`: Retrieve chronological dialogue.
 * `GET /api/v1/conversations/users/{user_id}/context`: Compile structured context payload for local LLM inference.
 * `POST /api/v1/conversations/users/{user_id}/chat`: Execute authenticated, multi-turn conversational turn orchestrated by `ConversationEngine` with deterministic pre-LLM emergency signal interception, context synthesis, sliding dialogue history, and RBAC action permissions.
+* `POST /api/v1/conversations/users/{user_id}/emergency/resolve`: Authorized caregiver resolution procedure to clear an active resident emergency and stand down alert state.
 
 ---
 
@@ -164,7 +165,7 @@ Run the complete test suite:
 pytest -v
 ```
 
-All 113 unit, integration, and intelligence security tests execute in under 0.9 seconds against an isolated in-memory SQLite database.
+All 125 unit, integration, and intelligence security tests execute in under 1.0 seconds against an isolated in-memory SQLite database.
 
 ---
 
@@ -320,13 +321,21 @@ The `ConversationEngine` (`app/intelligence/engine.py`) coordinates multi-turn d
 ### 8.2 Safety Invariants & Emergency State Machines
 1. **Deterministic Pre-LLM Emergency Interception:**
    Emergency detection (`EmergencySignalDetector.evaluate_utterance`) strictly executes before context compilation or model invocation. Critical distress signals bypass LLM execution completely, guaranteeing sub-second response times and eliminating latency or failure risks.
-2. **Confirmed Emergency Retention Invariant:**
-   If a user utters an affirmative phrase (e.g. *"I am fine"*, *"sab theek hai"*, *"aami bhalo aachi"*) while an active `CRITICAL` emergency is recorded in the session, the engine preserves `severity=CRITICAL` and sets `pending_resolution=True`. The active emergency remains in effect until an authorized caregiver resolution workflow is completed. Elderly residents who have suffered a fall or head injury may reflexively or confusedly report feeling fine; verbal affirmations alone must never cancel an acute physical alert.
-3. **Uncertain Distress Safe Stand-Down:**
-   In contrast to acute emergencies, ordinary ambiguous check-ins (e.g. mild dizziness) can be stood down when the resident confirms they are safe (`is_safe_confirmed=True`), transitioning the session back to normal conversational state without requiring caregiver intervention.
-4. **Truthful System Communication:**
-   Emergency responses honestly disclose system capabilities. The assistant confirms that the high-priority alert protocol is triggered and registered locally, but never falsely claims that 911 or emergency services have been dispatched without an active, verified third-party integration.
-5. **Zero External Inference Dependencies:**
+2. **Durable Emergency State Persistence:**
+   An active `CRITICAL` or `URGENT` emergency is committed to the database (`active_emergencies` table) and associated with the resident's account (`user_id`), NOT a transient conversation session.
+   Starting a new dialogue session, changing operating modes, restarting the application host, or sending subsequent non-emergency messages CANNOT silently clear or reset an active emergency.
+3. **Confirmed Emergency Retention Invariant:**
+   If a user utters an affirmative phrase (e.g. *"I am fine"*, *"sab theek hai"*, *"aami bhalo aachi"*) while an active `CRITICAL` emergency is recorded, the engine sets `pending_resolution=True` and preserves `active_emergency=True`. The active emergency remains in effect until an authorized caregiver completes the resolution procedure. Elderly residents who have suffered a fall or head injury may reflexively report feeling fine; verbal affirmations alone must never cancel an acute physical alert.
+4. **Honest Emergency Communication & Multi-Tier State Tracking:**
+   The engine strictly distinguishes between:
+   * **Emergency Detected:** Recognized by deterministic regex/phonetic matcher.
+   * **Recorded Locally:** Committed to local database (`recorded_locally: True`).
+   * **Notification Attempted:** External network notification initiated (`notification_attempted: False` in local phase).
+   * **Notification Delivered:** Confirmed received by caregiver or external service (`notification_delivered: False` in local phase).
+   The system NEVER claims that a caregiver is being notified or has been notified unless confirmed by a verified external delivery integration.
+5. **Personal Information Protection (Zero Hallucination):**
+   The engine and `MockLLMClient` NEVER invent resident-specific personal data (such as medication names, times, reminders, doctor appointments, or medical history). When verified service integrations are unavailable, the assistant explicitly states that it cannot access the information.
+6. **Zero External Inference Dependencies:**
    Phase 4.2 integrates `MockLLMClient` with deterministic responses, allowing full unit, integration, and end-to-end HTTP testing without requiring Ollama runtime installations, background model daemons, or downloading multi-gigabyte neural weights.
 
 ### 8.3 Authenticated Chat Turn API (`POST /api/v1/conversations/users/{user_id}/chat`)
@@ -335,7 +344,7 @@ The `ConversationEngine` (`app/intelligence/engine.py`) coordinates multi-turn d
 * **Authorization Scope:** The authenticated user must match `user_id`, or have the `CAREGIVER` role. Family Viewers have read-only permissions and are rejected with HTTP 403 Forbidden.
 * **Identity Security:** The target `user_id` is bound exclusively from the validated URL path parameter. Any arbitrary `user_id` in request payloads is ignored.
 
-#### Example Request:
+#### Example Request: Unsupported Medication Query (Honest Access Report)
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/conversations/users/1/chat \
   -H "Authorization: Bearer <RESIDENT_JWT>" \
@@ -345,15 +354,15 @@ curl -X POST http://127.0.0.1:8000/api/v1/conversations/users/1/chat \
   }'
 ```
 
-#### Example Conversational Response:
+#### Example Response (No Hallucination):
 ```json
 {
-  "session_id": 1,
+  "session_id": "c3f8e65e-3bd7-463e-a89e-ecf8f3b20721",
   "user_message_id": 1,
   "user_utterance": "What medications do I have scheduled for this morning?",
   "assistant_message_id": 2,
-  "spoken_response": "You have your blood pressure medication scheduled for 9:00 AM.",
-  "intent": "general_chat",
+  "spoken_response": "I do not have access to your medication schedule or medical records. Please consult your caregiver or healthcare provider.",
+  "intent": "reminder_query",
   "proposed_action": {
     "action_type": "none",
     "parameters": {},
@@ -368,31 +377,37 @@ curl -X POST http://127.0.0.1:8000/api/v1/conversations/users/1/chat \
     "is_safe_confirmed": false,
     "requires_confirmation": false,
     "requires_immediate_escalation": false,
-    "repeat_count": 0,
+    "repeat_count": 1,
     "user_affirmation": null,
-    "pending_resolution": false
+    "pending_resolution": false,
+    "recorded_locally": false,
+    "notification_attempted": false,
+    "notification_delivered": false
   },
   "session_state": "active_conversation",
   "active_emergency": false,
-  "pending_resolution": false
+  "pending_resolution": false,
+  "recorded_locally": false,
+  "notification_attempted": false,
+  "notification_delivered": false
 }
 ```
 
-#### Example Emergency Fast-Path Response:
+#### Example Emergency Fast-Path Response (Truthful Notification State):
 ```json
 {
-  "session_id": 1,
+  "session_id": "c3f8e65e-3bd7-463e-a89e-ecf8f3b20721",
   "user_message_id": 3,
   "user_utterance": "I fell down and cannot get up, help!",
   "assistant_message_id": 4,
-  "spoken_response": "I have registered a critical emergency: Fall detected (unable to rise). I am notifying your caregiver right away. Please stay still and do not try to move.",
+  "spoken_response": "Emergency signal registered locally: English: Fall detected (unable to rise). Please remain calm and stay in a safe position. (System note: Emergency recorded locally. External notification has not been dispatched.)",
   "intent": "emergency",
   "proposed_action": {
     "action_type": "trigger_emergency_alert",
     "parameters": {
       "severity": "critical",
       "trigger_phrase": "fell down and cannot get up",
-      "repeat_count": 0
+      "repeat_count": 1
     },
     "requires_confirmation": false
   },
@@ -405,12 +420,64 @@ curl -X POST http://127.0.0.1:8000/api/v1/conversations/users/1/chat \
     "is_safe_confirmed": false,
     "requires_confirmation": false,
     "requires_immediate_escalation": true,
-    "repeat_count": 0,
+    "repeat_count": 1,
     "user_affirmation": null,
-    "pending_resolution": false
+    "pending_resolution": false,
+    "recorded_locally": true,
+    "notification_attempted": false,
+    "notification_delivered": false
   },
   "session_state": "active_conversation",
   "active_emergency": true,
-  "pending_resolution": false
+  "pending_resolution": false,
+  "recorded_locally": true,
+  "notification_attempted": false,
+  "notification_delivered": false
 }
 ```
+
+---
+
+### 8.4 Caregiver Emergency Resolution Workflow (`POST /api/v1/conversations/users/{user_id}/emergency/resolve`)
+
+An active critical emergency can **only** be cleared through an authorized caregiver resolution procedure.
+
+* **Endpoint:** `POST /api/v1/conversations/users/{user_id}/emergency/resolve`
+* **Authorization Scope:** Strictly restricted to authenticated users with the `CAREGIVER` role. Residents and Family Viewers receive HTTP 403 Forbidden.
+
+#### Example Caregiver Resolution Request:
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/conversations/users/1/emergency/resolve \
+  -H "Authorization: Bearer <CAREGIVER_JWT>" \
+  -H "Content-Type: application/json"
+```
+
+#### Example Resolution Response:
+```json
+{
+  "status": "resolved",
+  "emergency_id": 1,
+  "user_id": 1,
+  "severity": "critical",
+  "resolved_by": 2,
+  "resolved_at": "2026-11-26T01:25:00.000000+00:00"
+}
+```
+
+---
+
+### 8.5 Implemented vs. Planned Functionality Matrix
+
+| Capability | Current Status | Architectural Implementation / Future Target |
+| :--- | :--- | :--- |
+| **Pre-LLM Emergency Detection** | **Implemented** | Deterministic multilingual regex and phonetic normalization executed before LLM inference |
+| **Durable Emergency Persistence** | **Implemented** | Session-independent `active_emergencies` database table anchored to `User` |
+| **Emergency Delivery Honesty** | **Implemented** | 4-state tracking (`detected`, `recorded_locally`, `notification_attempted`, `notification_delivered`) |
+| **Caregiver Resolution Workflow** | **Implemented** | Dedicated endpoint `POST /emergency/resolve` restricted to `UserRole.CAREGIVER` |
+| **Personal Data Protection** | **Implemented** | Engine & MockLLM refuse to fabricate medication names, schedules, or appointments |
+| **Transaction Integrity** | **Implemented** | Atomic dual-message turn persistence with immediate database rollback on failure |
+| **Sliding Window History** | **Implemented** | Context engine compiles recent chronological messages for few-shot prompt builder |
+| **Live Caregiver Push Notifications** | *Planned (Phase 5/6)* | External webhook/SMS/push delivery adapter with delivery receipts |
+| **Emergency EMS / 911 Dispatch** | *Planned (Phase 6)* | Hardware telephony / e911 emergency services integration |
+| **Resident Medication & Reminder DB** | *Planned (Phase 6)* | Persistent cron schedule & medication adherence tracking database |
+

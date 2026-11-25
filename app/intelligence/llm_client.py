@@ -1,6 +1,7 @@
 """Local LLM Client Protocol and Mock Implementation for CARE-BOT."""
 
 import asyncio
+import re
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 from app.intelligence.schemas import LLMResponse, ModelMetadata
 
@@ -66,6 +67,7 @@ class MockLLMClient:
         latency_ms: float = 15.0,
         model_name: str = "mock-carebot-v1",
     ):
+        self._custom_default = default_response is not None
         self._default_response = (
             default_response
             or '{"intent": "general_chat", "confidence": 0.95, "detected_language": "en", "spoken_response": "I am here to help you.", "proposed_action": {"action_type": "none", "parameters": {}}}'
@@ -84,6 +86,76 @@ class MockLLMClient:
     def clear_calls(self) -> None:
         """Reset call history log."""
         self.calls.clear()
+
+    def _detect_unsupported_personal_query(self, prompt: str, system_prompt: Optional[str]) -> Optional[str]:
+        """Detect queries requesting resident-specific facts that are not available.
+
+        SAFETY INVARIANT:
+        The mock LLM MUST NOT invent medication names, schedules, reminders, medical history,
+        appointments, or other resident-specific facts. If verified data is not present in
+        the context, it states clearly that it cannot access the information.
+        """
+        combined = f"{system_prompt or ''}\n{prompt}".lower()
+
+        # Check language
+        is_hindi = "hindi" in combined or "devanagari" in combined
+        is_bengali = "bengali" in combined
+
+        # 1. Medication or medical history queries
+        if re.search(
+            r"\b(medication|medications|medicine|medicines|pill|pills|prescription|dose|dosage|medical\s+history|medical\s+records|diagnosis)\b",
+            prompt,
+            re.IGNORECASE,
+        ):
+            if is_hindi:
+                resp = "मेरे पास आपकी दवा की समय-सारणी या चिकित्सा रिकॉर्ड की जानकारी नहीं है। कृपया अपने देखभालकर्ता या डॉक्टर से संपर्क करें।"
+            elif is_bengali:
+                resp = "আমার কাছে আপনার ওষুধের সময়সূচী বা চিকিৎসা রেকর্ডের তথ্য নেই। অনুগ্রহ করে আপনার কেয়ারগিভার বা ডাক্তারের সাথে পরামর্শ করুন।"
+            else:
+                resp = "I do not have access to your medication schedule or medical records. Please consult your caregiver or healthcare provider."
+            return (
+                '{"intent": "reminder_query", "confidence": 0.95, "detected_language": "'
+                + ("hi" if is_hindi else ("bn" if is_bengali else "en"))
+                + f'", "spoken_response": "{resp}", "proposed_action": {{"action_type": "none", "parameters": {{}}}}}}'
+            )
+
+        # 2. Reminder or schedule queries
+        if re.search(
+            r"\b(what\s+are\s+my\s+reminders|what\s+do\s+i\s+have\s+scheduled|my\s+schedule|my\s+agenda|remind\s+query|check\s+reminders|calendar)\b",
+            prompt,
+            re.IGNORECASE,
+        ):
+            if is_hindi:
+                resp = "मेरे पास इस समय आपके रिमाइंडर्स या शेड्यूल की जानकारी उपलब्ध नहीं है।"
+            elif is_bengali:
+                resp = "এই মুহূর্তে আমার কাছে আপনার রিমাইন্ডার বা সময়সূচীর তথ্য উপলব্ধ নেই।"
+            else:
+                resp = "I cannot access your reminders or schedule at this time because that service is not connected."
+            return (
+                '{"intent": "reminder_query", "confidence": 0.95, "detected_language": "'
+                + ("hi" if is_hindi else ("bn" if is_bengali else "en"))
+                + f'", "spoken_response": "{resp}", "proposed_action": {{"action_type": "none", "parameters": {{}}}}}}'
+            )
+
+        # 3. Doctor appointment queries
+        if re.search(
+            r"\b(doctor\s+appointment|clinic\s+appointment|when\s+is\s+my\s+appointment)\b",
+            prompt,
+            re.IGNORECASE,
+        ):
+            if is_hindi:
+                resp = "मेरे पास आपके अपॉइंटमेंट शेड्यूल की जानकारी नहीं है।"
+            elif is_bengali:
+                resp = "আমার কাছে আপনার অ্যাপয়েন্টমেন্ট সময়সূচীর তথ্য নেই।"
+            else:
+                resp = "I do not have access to your appointment schedule at this time."
+            return (
+                '{"intent": "reminder_query", "confidence": 0.95, "detected_language": "'
+                + ("hi" if is_hindi else ("bn" if is_bengali else "en"))
+                + f'", "spoken_response": "{resp}", "proposed_action": {{"action_type": "none", "parameters": {{}}}}}}'
+            )
+
+        return None
 
     async def generate(
         self,
@@ -116,9 +188,15 @@ class MockLLMClient:
         # Simulate minimal non-blocking asynchronous processing latency
         await asyncio.sleep(0.001)
 
-        # Retrieve next canned response or fallback to default
+        # Retrieve next canned response, detect unsupported personal facts, or fallback to default
         if self._canned_responses:
             content = self._canned_responses.pop(0)
+        elif not self._custom_default:
+            unsupported = self._detect_unsupported_personal_query(prompt, system_prompt)
+            if unsupported:
+                content = unsupported
+            else:
+                content = self._default_response
         else:
             content = self._default_response
 
