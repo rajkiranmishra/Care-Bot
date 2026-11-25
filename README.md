@@ -74,7 +74,7 @@ CARE-BOT/
 │   ├── services/           # External integrations (weather, adapters)
 │   └── speech/             # Offline STT, TTS & audio streaming (Phase 7)
 │
-└── tests/                  # Automated Pytest Suite (90 Unit & Integration Tests)
+└── tests/                  # Automated Pytest Suite (96 Unit & Integration Tests)
     ├── conftest.py         # In-memory SQLite fixtures, TestClient & auth token helpers
     ├── test_config.py      # Settings, secret validation & environment tests
     ├── test_database.py    # Database connection & transaction tests
@@ -85,8 +85,8 @@ CARE-BOT/
     ├── test_context_engine.py # Context synthesis & language prompt tests
     ├── test_api/
     │   └── test_health.py  # Health check & diagnostic endpoint tests
-    └── test_intelligence/  # Phase 4.1 Intelligence & Emergency Tests (32 Tests)
-        ├── test_emergency.py # Pre-LLM multilingual emergency detection & silence tests
+    └── test_intelligence/  # Phase 4.1 Intelligence & Emergency Tests (38 Tests)
+        ├── test_emergency.py # Pre-LLM emergency detection, silence policy & regression tests
         ├── test_parser.py    # Defensive JSON extraction & safe fallback tests
         ├── test_prompt_builder.py # Prompt builder & few-shot exemplars tests
         ├── test_validator.py # Action whitelist & parameter schema boundary tests
@@ -161,7 +161,7 @@ Run the complete test suite:
 pytest -v
 ```
 
-All 90 unit, integration, and intelligence security tests execute in under 0.8 seconds against an isolated in-memory SQLite database.
+All 96 unit, integration, and intelligence security tests execute in under 0.8 seconds against an isolated in-memory SQLite database.
 
 ---
 
@@ -245,10 +245,17 @@ All 90 unit, integration, and intelligence security tests execute in under 0.8 s
 ### 7.1 Deterministic Pre-LLM Emergency Detection
 The emergency signal detection layer executes **before** LLM inference:
 1. **Deterministic & Resilient:** Functions independently of local LLM availability, connection drops, or model errors.
-2. **Multilingual Phrase Matching:** Detects falls, acute chest pain, and distress pleas in English, Hindi (Devanagari & Hinglish), and Bengali (Bengali script & Romanized).
-3. **Phonetic & Transcription Error Resilience:** Normalizes elongated syllables (`"heeeelp"`, `"bachaaao"`) and phonetic variations.
-4. **False Positive Suppression:** Contextual filters suppress benign recreational or task-oriented uses of "help" (e.g. crosswords, finding glasses, movie quotes).
-5. **Inviolable Silence Invariant:** *"Silence must never be interpreted as confirmation that the user is safe."* Unanswered welfare checks or silence following potential distress are escalated to CRITICAL.
+2. **Separation of Detection from Notification:** `EmergencySignalDetector` strictly classifies signals and returns diagnostics. It does **not** dispatch notifications, dial emergency services, or initiate external side-effects. Notification execution is decoupled and deferred to a separately authorized service.
+3. **Multilingual Phrase Matching:** Detects falls, acute chest pain, and distress pleas in English, Hindi (Devanagari & Hinglish), and Bengali (Bengali script & Romanized).
+4. **Phonetic & Transcription Error Resilience:** Normalizes elongated syllables (`"heeeelp"`, `"bachaaao"`) and phonetic variations.
+5. **False Positive Suppression:** Contextual filters suppress benign recreational or task-oriented uses of "help" (e.g. crosswords, finding glasses, movie quotes).
+6. **Refined Silence Safety Invariant & Escalation Policy:**
+   * Silence must **never** be interpreted as proof that the user is safe (`is_safe_confirmed=False`).
+   * Silence alone without prior distress does **not** automatically establish a critical emergency (remains `NORMAL`).
+   * Distinguishes distinct `NORMAL`, `UNCERTAIN`, and `CRITICAL` states.
+   * Unanswered welfare checks follow a configurable `WelfareEscalationPolicy` (considering prior distress signals, user vulnerability multiplier, and consecutive unanswered prompt thresholds).
+   * Silence following a confirmed emergency (e.g. fall) never downgrades or resets the emergency status.
+   * Only an explicit, affirmative confirmation from the user (e.g. *"I am fine"*, *"false alarm"*, *"sab theek hai"*) sets `is_safe_confirmed=True`.
 
 ### 7.2 Safety Invariants for Local LLM Integration
 1. **Advisory Only (No Direct DB or Execution Access):** The local LLM receives read-only textual prompts and outputs structured JSON text. It has zero database sockets, zero SQL execution authority, and zero ORM access.

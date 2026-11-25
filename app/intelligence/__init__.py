@@ -21,6 +21,7 @@ from app.intelligence.schemas import (
     ModelMetadata,
     ParsedLLMResponse,
     ProposedAction,
+    WelfareEscalationPolicy,
 )
 from app.intelligence.validator import ActionValidationError, ActionValidator
 
@@ -34,6 +35,7 @@ __all__ = [
     "ActionType",
     "EmergencySeverity",
     "EmergencySignal",
+    "WelfareEscalationPolicy",
     "ProposedAction",
     "ParsedLLMResponse",
     "LLMResponse",

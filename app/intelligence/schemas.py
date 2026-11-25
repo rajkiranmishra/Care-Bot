@@ -31,23 +31,60 @@ class ActionType(str, enum.Enum):
 
 
 class EmergencySeverity(str, enum.Enum):
-    """Severity levels for detected emergency signals."""
-    CRITICAL = "critical"      # Immediate danger: physical fall, loss of consciousness, severe trauma/chest pain
-    URGENT = "urgent"          # High concern: acute dizziness, bleeding, inability to get out of bed
-    UNCERTAIN = "uncertain"    # Ambiguous or muffled distress phrase; requires active confirmation check
-    NONE = "none"              # No emergency signal detected
+    """Severity levels for detected emergency signals.
+
+    Distinguishes NORMAL (safe/routine), UNCERTAIN (ambiguous distress requiring check),
+    URGENT (high concern needing prompt assistance), and CRITICAL (immediate danger/trauma).
+    """
+    CRITICAL = "critical"      # Immediate danger: physical fall, loss of consciousness, acute chest pain
+    URGENT = "urgent"          # High concern: acute dizziness, bleeding, unable to rise from bed
+    UNCERTAIN = "uncertain"    # Ambiguous or muffled distress; requires active confirmation check
+    NORMAL = "normal"          # Standard non-distress state
+    NONE = "none"              # Backward-compatible alias for NORMAL
+
+
+class WelfareEscalationPolicy(BaseModel):
+    """Configurable parameters governing welfare checks and silence escalation."""
+    welfare_timeout_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        description="Base seconds to wait for user voice response to a welfare check",
+    )
+    unanswered_threshold: int = Field(
+        default=2,
+        ge=1,
+        description="Number of unanswered welfare prompts before escalating from UNCERTAIN to CRITICAL",
+    )
+    auto_escalate_to_critical: bool = Field(
+        default=False,
+        description="Whether silence alone without prior distress can ever escalate to CRITICAL (default False)",
+    )
+    user_vulnerability_multiplier: float = Field(
+        default=1.0,
+        ge=0.5,
+        le=3.0,
+        description="Multiplier adjusting timeout sensitivity for high-risk residents (e.g. 1.5 for faster escalation)",
+    )
+
+    model_config = ConfigDict(frozen=True)
 
 
 class EmergencySignal(BaseModel):
-    """Result of deterministic pre-LLM emergency signal evaluation."""
+    """Result of deterministic pre-LLM emergency signal evaluation.
+
+    ARCHITECTURAL INVARIANT:
+    EmergencySignal represents pure diagnostic signal identification.
+    It does NOT initiate network notifications or contact emergency services.
+    External side-effects are strictly deferred to a separately authorized service.
+    """
     detected: bool = Field(default=False, description="Whether an emergency pattern was recognized")
-    severity: EmergencySeverity = Field(default=EmergencySeverity.NONE)
+    severity: EmergencySeverity = Field(default=EmergencySeverity.NORMAL)
     trigger_phrase: Optional[str] = Field(default=None, description="Matched keyword or utterance phrase")
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reasoning: str = Field(default="", description="Diagnostic rationale for the detection")
     requires_immediate_escalation: bool = Field(
         default=False,
-        description="True for CRITICAL/URGENT cases requiring emergency contact alert without delay",
+        description="True for CRITICAL/URGENT cases where authorized service should alert caregivers",
     )
     requires_confirmation: bool = Field(
         default=False,
@@ -56,6 +93,20 @@ class EmergencySignal(BaseModel):
     is_false_positive: bool = Field(
         default=False,
         description="Flagged true if conversational negation or recreational context detected",
+    )
+    is_safe_confirmed: bool = Field(
+        default=False,
+        description="True ONLY if the user has explicitly and affirmatively stated they are safe/okay",
+    )
+    repeat_count: int = Field(
+        default=1,
+        ge=1,
+        description="Consecutive repetitions of distress triggers within active window",
+    )
+    unanswered_checks: int = Field(
+        default=0,
+        ge=0,
+        description="Count of consecutive unanswered welfare prompts",
     )
 
     model_config = ConfigDict(frozen=True)
