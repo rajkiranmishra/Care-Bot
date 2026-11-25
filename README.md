@@ -59,13 +59,22 @@ CARE-BOT/
 │   │   ├── schemas.py      # User and Preferences Pydantic validation schemas
 │   │   └── service.py      # User registration & preferences business logic
 │   │
-│   ├── intelligence/       # Local LLM connector & decision engine (Phase 4)
+│   ├── intelligence/       # Intelligence Engine (Phase 4.1)
+│   │   ├── schemas.py      # Pydantic schemas for intents, actions & LLM responses
+│   │   ├── llm_client.py   # LocalLLMClient protocol & MockLLMClient
+│   │   ├── emergency.py    # Deterministic pre-LLM emergency signal detection
+│   │   ├── prompt_builder.py # Persona prompt builder with JSON schema guidance
+│   │   ├── parser.py       # Defensive JSON extractor and safe fallback parser
+│   │   ├── intent.py       # Intent classification interfaces & routing
+│   │   ├── validator.py    # ActionValidator whitelist & parameter boundary checker
+│   │   └── permissions.py  # PermissionChecker enforcing RBAC on proposed actions
+│   │
 │   ├── language/           # Multilingual NLP & script normalizers (Phase 5)
 │   ├── safety/             # Deterministic emergency trie & guardrails (Phase 6)
 │   ├── services/           # External integrations (weather, adapters)
 │   └── speech/             # Offline STT, TTS & audio streaming (Phase 7)
 │
-└── tests/                  # Automated Pytest Suite (58 Unit & Integration Tests)
+└── tests/                  # Automated Pytest Suite (90 Unit & Integration Tests)
     ├── conftest.py         # In-memory SQLite fixtures, TestClient & auth token helpers
     ├── test_config.py      # Settings, secret validation & environment tests
     ├── test_database.py    # Database connection & transaction tests
@@ -74,8 +83,15 @@ CARE-BOT/
     ├── test_users.py       # User CRUD, operating modes & preferences tests
     ├── test_conversations.py # Session persistence & cross-user isolation tests
     ├── test_context_engine.py # Context synthesis & language prompt tests
-    └── test_api/
-        └── test_health.py  # Health check & diagnostic endpoint tests
+    ├── test_api/
+    │   └── test_health.py  # Health check & diagnostic endpoint tests
+    └── test_intelligence/  # Phase 4.1 Intelligence & Emergency Tests (32 Tests)
+        ├── test_emergency.py # Pre-LLM multilingual emergency detection & silence tests
+        ├── test_parser.py    # Defensive JSON extraction & safe fallback tests
+        ├── test_prompt_builder.py # Prompt builder & few-shot exemplars tests
+        ├── test_validator.py # Action whitelist & parameter schema boundary tests
+        ├── test_permissions.py # RBAC action permission & prompt injection tests
+        └── test_llm_client.py # LocalLLMClient protocol & MockLLMClient tests
 ```
 
 ---
@@ -145,7 +161,7 @@ Run the complete test suite:
 pytest -v
 ```
 
-All 58 unit and security integration tests execute in under 0.8 seconds against an isolated in-memory SQLite database.
+All 90 unit, integration, and intelligence security tests execute in under 0.8 seconds against an isolated in-memory SQLite database.
 
 ---
 
@@ -221,3 +237,22 @@ All 58 unit and security integration tests execute in under 0.8 seconds against 
    * Implement a `CaregiverResidentMapping` relationship table allowing household administrators to delegate access to specific caregivers or family viewers on a per-resident basis.
 3. **Hardware Keystore:**
    * Store `DEVICE_API_KEY` in the host's secure enclave / keychain rather than plaintext environment files on hardware deployments.
+
+---
+
+## 7. Phase 4.1 Intelligence Architecture & Pre-LLM Emergency Layer
+
+### 7.1 Deterministic Pre-LLM Emergency Detection
+The emergency signal detection layer executes **before** LLM inference:
+1. **Deterministic & Resilient:** Functions independently of local LLM availability, connection drops, or model errors.
+2. **Multilingual Phrase Matching:** Detects falls, acute chest pain, and distress pleas in English, Hindi (Devanagari & Hinglish), and Bengali (Bengali script & Romanized).
+3. **Phonetic & Transcription Error Resilience:** Normalizes elongated syllables (`"heeeelp"`, `"bachaaao"`) and phonetic variations.
+4. **False Positive Suppression:** Contextual filters suppress benign recreational or task-oriented uses of "help" (e.g. crosswords, finding glasses, movie quotes).
+5. **Inviolable Silence Invariant:** *"Silence must never be interpreted as confirmation that the user is safe."* Unanswered welfare checks or silence following potential distress are escalated to CRITICAL.
+
+### 7.2 Safety Invariants for Local LLM Integration
+1. **Advisory Only (No Direct DB or Execution Access):** The local LLM receives read-only textual prompts and outputs structured JSON text. It has zero database sockets, zero SQL execution authority, and zero ORM access.
+2. **Action Whitelist:** Models may only propose actions from an enumerated whitelist (`none`, `create_reminder`, `query_weather`, `trigger_emergency_alert`, `health_log`). Arbitrary tools or dynamic function names are rejected.
+3. **Parameter Schema Boundaries:** Parameters are validated by `ActionValidator` with strict bounds (e.g. string lengths, time formats).
+4. **Server-Side Authorization Invariant:** Model outputs can **never** override server-side authorization. `PermissionChecker` validates every proposed action against the authenticated user's actual role (Family Viewers cannot mutate state).
+5. **Fail-Safe Response Parsing:** `ResponseParser` extracts JSON from markdown or chatter, tolerates missing non-critical fields, and falls back to safe conversational defaults upon syntax errors without crashing route handlers.
