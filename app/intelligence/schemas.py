@@ -44,7 +44,20 @@ class EmergencySeverity(str, enum.Enum):
 
 
 class WelfareEscalationPolicy(BaseModel):
-    """Configurable parameters governing welfare checks and silence escalation."""
+    """Configurable parameters governing welfare checks and silence escalation.
+
+    BEHAVIOR RULES:
+    1. unanswered_threshold:
+       Number of consecutive unanswered welfare prompts required before escalating beyond UNCERTAIN.
+       While unanswered_checks < unanswered_threshold, state remains UNCERTAIN with repeat prompts.
+    2. auto_escalate_to_critical:
+       - If True: When unanswered_checks reaches unanswered_threshold, escalates to CRITICAL severity.
+       - If False: When unanswered_checks reaches unanswered_threshold, escalates to URGENT severity
+         (alerting caregivers for follow-up without triggering immediate critical siren/dispatch).
+    3. user_vulnerability_multiplier:
+       Scales response window (effective_timeout = welfare_timeout_seconds / user_vulnerability_multiplier).
+       Higher values for vulnerable residents produce faster escalation.
+    """
     welfare_timeout_seconds: float = Field(
         default=30.0,
         ge=1.0,
@@ -53,11 +66,11 @@ class WelfareEscalationPolicy(BaseModel):
     unanswered_threshold: int = Field(
         default=2,
         ge=1,
-        description="Number of unanswered welfare prompts before escalating from UNCERTAIN to CRITICAL",
+        description="Number of unanswered welfare prompts before escalating from UNCERTAIN to URGENT or CRITICAL",
     )
     auto_escalate_to_critical: bool = Field(
         default=False,
-        description="Whether silence alone without prior distress can ever escalate to CRITICAL (default False)",
+        description="If True, silence exceeding unanswered_threshold escalates to CRITICAL; if False, escalates to URGENT",
     )
     user_vulnerability_multiplier: float = Field(
         default=1.0,
@@ -97,6 +110,14 @@ class EmergencySignal(BaseModel):
     is_safe_confirmed: bool = Field(
         default=False,
         description="True ONLY if the user has explicitly and affirmatively stated they are safe/okay",
+    )
+    user_affirmation: Optional[str] = Field(
+        default=None,
+        description="User's verbal affirmative response (e.g. 'I am fine'), recorded for review",
+    )
+    pending_resolution: bool = Field(
+        default=False,
+        description="True when an affirmative statement was spoken during an active CRITICAL emergency, requiring authorized caregiver clearance",
     )
     repeat_count: int = Field(
         default=1,

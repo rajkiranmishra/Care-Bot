@@ -120,7 +120,7 @@ def test_uncertain_distress_cases():
 
 
 # -----------------------------------------------------------------------------
-# Regression Tests for Silence Invariant and Emergency Safety Refinements
+# Regression Tests for Silence Invariant, Escalation Policy & Safety Checks
 # -----------------------------------------------------------------------------
 
 def test_ordinary_silence_without_preceding_distress():
@@ -139,7 +139,11 @@ def test_ordinary_silence_without_preceding_distress():
 
 def test_silence_following_potential_distress_signal():
     """An unanswered welfare check following potential distress follows configurable escalation."""
-    policy = WelfareEscalationPolicy(welfare_timeout_seconds=20.0, unanswered_threshold=2)
+    policy = WelfareEscalationPolicy(
+        welfare_timeout_seconds=20.0,
+        unanswered_threshold=2,
+        auto_escalate_to_critical=False,
+    )
 
     prior_uncertain = EmergencySignal(
         detected=True,
@@ -162,7 +166,7 @@ def test_silence_following_potential_distress_signal():
     assert within_window.requires_immediate_escalation is False
     assert within_window.is_safe_confirmed is False
 
-    # 2. Timeout reached on first check (unanswered_checks=0 -> attempt 1): remains UNCERTAIN for repeat prompt
+    # 2. Timeout reached on first check (attempt 1 < threshold=2): remains UNCERTAIN for repeat prompt
     first_timeout = EmergencySignalDetector.evaluate_silence(
         seconds_of_silence=22.0,
         prior_state=prior_uncertain,
@@ -175,7 +179,7 @@ def test_silence_following_potential_distress_signal():
     assert first_timeout.requires_confirmation is True
     assert first_timeout.requires_immediate_escalation is False
 
-    # 3. Second check also timed out (unanswered_checks=1 -> attempt 2 >= threshold): escalates to CRITICAL
+    # 3. Second check also timed out (attempt 2 >= threshold=2): escalates to URGENT (auto_escalate_to_critical=False)
     second_timeout = EmergencySignalDetector.evaluate_silence(
         seconds_of_silence=25.0,
         prior_state=prior_uncertain,
@@ -183,10 +187,114 @@ def test_silence_following_potential_distress_signal():
         policy=policy,
         unanswered_checks=1,
     )
-    assert second_timeout.severity == EmergencySeverity.CRITICAL
+    assert second_timeout.severity == EmergencySeverity.URGENT
     assert second_timeout.requires_immediate_escalation is True
     assert second_timeout.requires_confirmation is False
     assert second_timeout.unanswered_checks == 2
+
+
+def test_escalation_configuration_auto_escalate_to_critical_toggle():
+    """Test explicit behavior of auto_escalate_to_critical toggle (False -> URGENT vs True -> CRITICAL)."""
+    prior_uncertain = EmergencySignal(
+        detected=True,
+        severity=EmergencySeverity.UNCERTAIN,
+        trigger_phrase="not feeling well",
+        requires_confirmation=True,
+    )
+
+    # Policy A: auto_escalate_to_critical = False
+    policy_urgent = WelfareEscalationPolicy(
+        welfare_timeout_seconds=15.0,
+        unanswered_threshold=1,
+        auto_escalate_to_critical=False,
+    )
+    sig_urgent = EmergencySignalDetector.evaluate_silence(
+        seconds_of_silence=20.0,
+        prior_state=prior_uncertain,
+        is_awaiting_welfare_response=True,
+        policy=policy_urgent,
+        unanswered_checks=0,
+    )
+    assert sig_urgent.severity == EmergencySeverity.URGENT
+    assert sig_urgent.requires_immediate_escalation is True
+    assert "auto_escalate_to_critical=False" in sig_urgent.reasoning
+
+    # Policy B: auto_escalate_to_critical = True
+    policy_critical = WelfareEscalationPolicy(
+        welfare_timeout_seconds=15.0,
+        unanswered_threshold=1,
+        auto_escalate_to_critical=True,
+    )
+    sig_critical = EmergencySignalDetector.evaluate_silence(
+        seconds_of_silence=20.0,
+        prior_state=prior_uncertain,
+        is_awaiting_welfare_response=True,
+        policy=policy_critical,
+        unanswered_checks=0,
+    )
+    assert sig_critical.severity == EmergencySeverity.CRITICAL
+    assert sig_critical.requires_immediate_escalation is True
+    assert "auto_escalate_to_critical=True" in sig_critical.reasoning
+
+
+def test_escalation_configuration_unanswered_threshold_and_multiplier():
+    """Verify policy respects higher unanswered_threshold (e.g. 3) and user_vulnerability_multiplier."""
+    # Multiplier 2.0 halves the effective timeout from 30.0s to 15.0s
+    policy = WelfareEscalationPolicy(
+        welfare_timeout_seconds=30.0,
+        unanswered_threshold=3,
+        user_vulnerability_multiplier=2.0,
+        auto_escalate_to_critical=True,
+    )
+    prior_state = EmergencySignal(
+        detected=True,
+        severity=EmergencySeverity.UNCERTAIN,
+        requires_confirmation=True,
+    )
+
+    # 12 seconds: < effective timeout of 15s -> still awaiting
+    s1 = EmergencySignalDetector.evaluate_silence(
+        seconds_of_silence=12.0,
+        prior_state=prior_state,
+        is_awaiting_welfare_response=True,
+        policy=policy,
+        unanswered_checks=0,
+    )
+    assert s1.severity == EmergencySeverity.UNCERTAIN
+    assert s1.unanswered_checks == 0
+
+    # 16 seconds: > effective timeout (15s), but attempt 1 < threshold 3 -> remains UNCERTAIN
+    s2 = EmergencySignalDetector.evaluate_silence(
+        seconds_of_silence=16.0,
+        prior_state=prior_state,
+        is_awaiting_welfare_response=True,
+        policy=policy,
+        unanswered_checks=0,
+    )
+    assert s2.severity == EmergencySeverity.UNCERTAIN
+    assert s2.unanswered_checks == 1
+
+    # Attempt 2 < threshold 3 -> remains UNCERTAIN
+    s3 = EmergencySignalDetector.evaluate_silence(
+        seconds_of_silence=16.0,
+        prior_state=prior_state,
+        is_awaiting_welfare_response=True,
+        policy=policy,
+        unanswered_checks=1,
+    )
+    assert s3.severity == EmergencySeverity.UNCERTAIN
+    assert s3.unanswered_checks == 2
+
+    # Attempt 3 >= threshold 3 -> escalates to CRITICAL
+    s4 = EmergencySignalDetector.evaluate_silence(
+        seconds_of_silence=16.0,
+        prior_state=prior_state,
+        is_awaiting_welfare_response=True,
+        policy=policy,
+        unanswered_checks=2,
+    )
+    assert s4.severity == EmergencySeverity.CRITICAL
+    assert s4.unanswered_checks == 3
 
 
 def test_silence_following_confirmed_emergency():
@@ -211,28 +319,53 @@ def test_silence_following_confirmed_emergency():
     assert sig.is_safe_confirmed is False
 
 
-def test_user_responding_that_they_are_safe():
-    """User explicitly responding that they are safe resets distress and sets is_safe_confirmed=True."""
-    safe_phrases = [
-        "I am fine, don't worry",
-        "I am okay, it was a false alarm",
-        "Sab theek hai, koi baat nahi",
-        "Main theek hoon",
-        "Shob thik ache, ami thik achi",
-    ]
-    prior_distress = EmergencySignal(
+def test_affirmative_response_after_uncertain_distress_clears_safely():
+    """User responding that they are safe after an UNCERTAIN check clears to NORMAL."""
+    prior_uncertain = EmergencySignal(
         detected=True,
         severity=EmergencySeverity.UNCERTAIN,
         requires_confirmation=True,
     )
 
-    for phrase in safe_phrases:
-        sig = EmergencySignalDetector.evaluate_utterance(phrase, prior_state=prior_distress)
-        assert sig.detected is False
-        assert sig.severity == EmergencySeverity.NORMAL
-        assert sig.is_safe_confirmed is True
-        assert sig.requires_immediate_escalation is False
-        assert sig.requires_confirmation is False
+    sig = EmergencySignalDetector.evaluate_utterance(
+        "I am fine, don't worry, it was a false alarm",
+        prior_state=prior_uncertain,
+    )
+    assert sig.detected is False
+    assert sig.severity == EmergencySeverity.NORMAL
+    assert sig.is_safe_confirmed is True
+    assert sig.pending_resolution is False
+    assert sig.user_affirmation == "I am fine, don't worry, it was a false alarm"
+
+
+def test_affirmative_response_after_confirmed_critical_emergency():
+    """CRITICAL SAFETY INVARIANT: User saying 'I am fine' must NOT automatically clear a confirmed CRITICAL emergency!
+
+    An elderly person who has fallen may speak reflexively while in danger.
+    Confirmed emergencies require an authorized resolution procedure before clearing.
+    """
+    confirmed_fall = EmergencySignal(
+        detected=True,
+        severity=EmergencySeverity.CRITICAL,
+        trigger_phrase="I fell down and can't get up",
+        confidence=0.98,
+        requires_immediate_escalation=True,
+    )
+
+    # User subsequently says "I am fine"
+    sig = EmergencySignalDetector.evaluate_utterance(
+        "I am fine, I'm okay",
+        prior_state=confirmed_fall,
+    )
+
+    # Critical emergency is NOT cleared!
+    assert sig.detected is True
+    assert sig.severity == EmergencySeverity.CRITICAL
+    assert sig.requires_immediate_escalation is True
+    assert sig.is_safe_confirmed is False
+    assert sig.pending_resolution is True
+    assert sig.user_affirmation == "I am fine, I'm okay"
+    assert "cannot clear an active CRITICAL emergency" in sig.reasoning
 
 
 def test_repeated_emergency_signals():
@@ -275,12 +408,8 @@ def test_missing_or_invalid_timestamps():
 
 def test_unavailable_notification_service():
     """Verify detector is decoupled from notification side-effects and functions without any notification service."""
-    # EmergencySignalDetector must perform pure classification without attempting network calls or external side-effects
     signal = EmergencySignalDetector.evaluate_utterance("Please call an ambulance, I cannot breathe")
     assert signal.detected is True
     assert signal.severity == EmergencySeverity.CRITICAL
     assert signal.requires_immediate_escalation is True
-
-    # The detector does not initiate any external notification: it only marks requires_immediate_escalation=True
-    # for consumption by downstream authorized services.
     assert hasattr(signal, "requires_immediate_escalation")

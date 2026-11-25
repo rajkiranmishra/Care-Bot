@@ -155,6 +155,30 @@ class EmergencySignalDetector:
         # 1. Check for explicit affirmative safety confirmations
         for pattern in AFFIRMATIVE_SAFE_PATTERNS:
             if pattern.search(normalized):
+                # Safety Rule (Phase 4.1 Refinement):
+                # An affirmative statement such as "I am fine" resolves an ordinary UNCERTAIN welfare check.
+                # HOWEVER, it must NOT automatically clear an already confirmed CRITICAL emergency!
+                if prior_state and prior_state.detected and prior_state.severity == EmergencySeverity.CRITICAL:
+                    return EmergencySignal(
+                        detected=True,
+                        severity=EmergencySeverity.CRITICAL,
+                        trigger_phrase=prior_state.trigger_phrase,
+                        confidence=prior_state.confidence,
+                        reasoning=(
+                            f"User stated affirmative safety phrase ('{raw_text.strip()}') following confirmed "
+                            "CRITICAL emergency. Safety invariant: affirmative verbal statement alone cannot "
+                            "clear an active CRITICAL emergency without authorized resolution procedure. "
+                            "CRITICAL status preserved with pending_resolution=True."
+                        ),
+                        requires_immediate_escalation=True,
+                        requires_confirmation=False,
+                        repeat_count=prior_state.repeat_count,
+                        is_safe_confirmed=False,
+                        user_affirmation=raw_text.strip(),
+                        pending_resolution=True,
+                        unanswered_checks=prior_state.unanswered_checks,
+                    )
+
                 return EmergencySignal(
                     detected=False,
                     severity=EmergencySeverity.NORMAL,
@@ -162,6 +186,8 @@ class EmergencySignalDetector:
                     confidence=0.99,
                     reasoning="User explicitly and affirmatively confirmed they are safe and okay.",
                     is_safe_confirmed=True,
+                    user_affirmation=raw_text.strip(),
+                    pending_resolution=False,
                     requires_immediate_escalation=False,
                     requires_confirmation=False,
                 )
@@ -355,42 +381,29 @@ class EmergencySignalDetector:
             )
 
         # Unanswered threshold reached!
-        # If there was a preceding distress signal (even ambiguous), escalate to CRITICAL
-        if has_prior_distress:
-            return EmergencySignal(
-                detected=True,
-                severity=EmergencySeverity.CRITICAL,
-                trigger_phrase="[UNRESPONSIVE_AFTER_DISTRESS]",
-                confidence=0.98,
-                reasoning=(
-                    f"User unresponsive following prior distress after {next_unanswered} welfare prompts "
-                    f"({seconds:.1f}s elapsed). Escalated to CRITICAL in accordance with escalation policy."
-                ),
-                requires_immediate_escalation=True,
-                requires_confirmation=False,
-                is_safe_confirmed=False,
-                unanswered_checks=next_unanswered,
-            )
-
-        # If there was NO prior distress signal, but welfare check was somehow unanswered
-        # (e.g. routine scheduled check-in), respect policy.auto_escalate_to_critical:
+        # Respect escalation_policy.auto_escalate_to_critical:
+        # - If True: silence exceeding unanswered_threshold escalates to CRITICAL
+        # - If False: silence exceeding unanswered_threshold escalates to URGENT (caregiver alert without critical siren)
         if escalation_policy.auto_escalate_to_critical:
-            final_severity = EmergencySeverity.CRITICAL
-            immediate_escalate = True
+            target_severity = EmergencySeverity.CRITICAL
+            reason_msg = (
+                f"Welfare check unanswered across {next_unanswered} attempts ({seconds:.1f}s elapsed). "
+                "Escalated to CRITICAL in accordance with escalation policy (auto_escalate_to_critical=True)."
+            )
         else:
-            final_severity = EmergencySeverity.URGENT
-            immediate_escalate = True
+            target_severity = EmergencySeverity.URGENT
+            reason_msg = (
+                f"Welfare check unanswered across {next_unanswered} attempts ({seconds:.1f}s elapsed). "
+                "Escalated to URGENT in accordance with escalation policy (auto_escalate_to_critical=False)."
+            )
 
         return EmergencySignal(
             detected=True,
-            severity=final_severity,
-            trigger_phrase="[UNRESPONSIVE_ROUTINE_CHECK]",
-            confidence=0.80,
-            reasoning=(
-                f"Welfare check timed out without response across {next_unanswered} checks ({seconds:.1f}s elapsed). "
-                f"Escalated to {final_severity.value} without assuming safety."
-            ),
-            requires_immediate_escalation=immediate_escalate,
+            severity=target_severity,
+            trigger_phrase=prior_state.trigger_phrase if prior_state else "[UNANSWERED_WELFARE_CHECK]",
+            confidence=0.95 if target_severity == EmergencySeverity.CRITICAL else 0.85,
+            reasoning=reason_msg,
+            requires_immediate_escalation=True,
             requires_confirmation=False,
             is_safe_confirmed=False,
             unanswered_checks=next_unanswered,

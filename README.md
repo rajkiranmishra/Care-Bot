@@ -74,7 +74,7 @@ CARE-BOT/
 │   ├── services/           # External integrations (weather, adapters)
 │   └── speech/             # Offline STT, TTS & audio streaming (Phase 7)
 │
-└── tests/                  # Automated Pytest Suite (96 Unit & Integration Tests)
+└── tests/                  # Automated Pytest Suite (99 Unit & Integration Tests)
     ├── conftest.py         # In-memory SQLite fixtures, TestClient & auth token helpers
     ├── test_config.py      # Settings, secret validation & environment tests
     ├── test_database.py    # Database connection & transaction tests
@@ -85,7 +85,7 @@ CARE-BOT/
     ├── test_context_engine.py # Context synthesis & language prompt tests
     ├── test_api/
     │   └── test_health.py  # Health check & diagnostic endpoint tests
-    └── test_intelligence/  # Phase 4.1 Intelligence & Emergency Tests (38 Tests)
+    └── test_intelligence/  # Phase 4.1 Intelligence & Emergency Tests (41 Tests)
         ├── test_emergency.py # Pre-LLM emergency detection, silence policy & regression tests
         ├── test_parser.py    # Defensive JSON extraction & safe fallback tests
         ├── test_prompt_builder.py # Prompt builder & few-shot exemplars tests
@@ -161,7 +161,7 @@ Run the complete test suite:
 pytest -v
 ```
 
-All 96 unit, integration, and intelligence security tests execute in under 0.8 seconds against an isolated in-memory SQLite database.
+All 99 unit, integration, and intelligence security tests execute in under 0.8 seconds against an isolated in-memory SQLite database.
 
 ---
 
@@ -255,7 +255,8 @@ The emergency signal detection layer executes **before** LLM inference:
    * Distinguishes distinct `NORMAL`, `UNCERTAIN`, and `CRITICAL` states.
    * Unanswered welfare checks follow a configurable `WelfareEscalationPolicy` (considering prior distress signals, user vulnerability multiplier, and consecutive unanswered prompt thresholds).
    * Silence following a confirmed emergency (e.g. fall) never downgrades or resets the emergency status.
-   * Only an explicit, affirmative confirmation from the user (e.g. *"I am fine"*, *"false alarm"*, *"sab theek hai"*) sets `is_safe_confirmed=True`.
+   * Only an explicit, affirmative confirmation from the user (e.g. *"I am fine"*, *"false alarm"*, *"sab theek hai"*) sets `is_safe_confirmed=True` for ordinary uncertain welfare checks.
+   * **Confirmed Emergency Safety Invariant:** An affirmative phrase (*"I am fine"*) spoken after a confirmed CRITICAL emergency does **not** clear the emergency state. It records the verbal affirmation in `user_affirmation` and sets `pending_resolution=True`, requiring authorized caregiver resolution before the alert can be dismissed.
 
 ### 7.2 Safety Invariants for Local LLM Integration
 1. **Advisory Only (No Direct DB or Execution Access):** The local LLM receives read-only textual prompts and outputs structured JSON text. It has zero database sockets, zero SQL execution authority, and zero ORM access.
