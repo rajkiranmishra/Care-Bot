@@ -181,7 +181,7 @@ def get_user(
     db: Session = Depends(get_db),
 ) -> UserResponse:
     """Retrieve complete user profile and preferences with ownership verification."""
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
     try:
         user = UserService.get_by_id(db, user_id)
         return UserResponse.model_validate(user)
@@ -201,7 +201,7 @@ def update_user(
     db: Session = Depends(get_db),
 ) -> UserResponse:
     """Update profile and switch operating mode. Family viewers are restricted."""
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
 
     if current_user.role == UserRole.FAMILY_VIEWER:
         raise HTTPException(
@@ -230,7 +230,7 @@ def update_user_preferences(
     db: Session = Depends(get_db),
 ) -> UserPreferencesResponse:
     """Update interaction preferences. Family viewers are restricted."""
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
 
     if current_user.role == UserRole.FAMILY_VIEWER:
         raise HTTPException(
@@ -256,7 +256,7 @@ def delete_user(
     db: Session = Depends(get_db),
 ) -> None:
     """Delete a user profile. Family viewers are restricted."""
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
 
     if current_user.role == UserRole.FAMILY_VIEWER:
         raise HTTPException(

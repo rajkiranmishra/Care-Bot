@@ -75,12 +75,12 @@ CARE-BOT/
 │   ├── services/           # External integrations (weather, adapters)
 │   └── speech/             # Offline STT, TTS & audio streaming (Phase 7)
 │
-└── tests/                  # Automated Pytest Suite (131 Unit & Integration Tests)
+└── tests/                  # Automated Pytest Suite (132 Unit & Integration Tests)
     ├── conftest.py         # In-memory SQLite fixtures, TestClient & auth token helpers
     ├── test_config.py      # Settings, secret validation & environment tests
     ├── test_database.py    # Database connection & transaction tests
     ├── test_security.py    # PBKDF2 600k hashing, salt, JWT token & RFC claims tests
-    ├── test_security_audit.py # RBAC, token auth, multi-process bootstrap, legacy DB & NFC audit tests
+    ├── test_security_audit.py # RBAC, token auth, multi-process bootstrap, legacy DB, resident assignment & NFC audit tests (18 Tests)
     ├── test_users.py       # User CRUD, operating modes & preferences tests
     ├── test_conversations.py # Session persistence & cross-user isolation tests
     ├── test_context_engine.py # Context synthesis & language prompt tests
@@ -167,7 +167,7 @@ Run the complete test suite:
 pytest -v
 ```
 
-All 125 unit, integration, and intelligence security tests execute in under 1.0 seconds against an isolated in-memory SQLite database.
+All 132 unit, integration, and intelligence security tests execute in under 1.1 seconds against an isolated in-memory SQLite database.
 
 ---
 
@@ -220,11 +220,12 @@ All 125 unit, integration, and intelligence security tests execute in under 1.0 
 5. **Administrator Recovery Procedure:**
    If the administrator account is locked or credentials are lost, **never re-open public bootstrap over the network**. Recovery must be performed via local host access (e.g. running a dedicated maintenance script with root permissions or updating the password hash directly in SQLite on the local filesystem).
 
-### 6.3 Documented System Limitations (Phase 3)
-* **Caregiver-to-Resident Authorization Scope:**
-  * Any user assigned the `CAREGIVER` role currently possesses system-wide oversight across all residents in the local deployment.
-  * Explicit fine-grained caregiver-to-resident assignments (e.g. a `CaregiverResidentMapping` join model) are not yet implemented in Phase 3.
-  * Do not claim per-resident multi-tenant authorization until explicit relationship mappings are implemented.
+### 6.3 Caregiver-to-Resident Authorization Scope (Phase 4.2 Enforcement)
+* **Resident-Specific Authorization Enforcement:**
+  * Ambient caregiver authority across all residents has been strictly eliminated.
+  * Caregivers can only access, view, or manage resources (profiles, preferences, dialogue sessions, messages, context, chat turns, and emergency resolutions) for residents to whom they have been explicitly assigned via the `CaregiverResidentAssignment` model (`caregiver_resident_assignments` table).
+  * Unassigned caregivers attempting to access any resident data are rejected with HTTP 403 Forbidden (`"Access denied: Caregiver X is not assigned to resident Y"`).
+  * Caregivers cannot self-assign to arbitrary residents; assignments require resident consent or device administrator (`X-Device-Key`) authorization.
 
 ### 6.4 Database Compatibility & Concurrency Boundaries
 * **SQLite (Default Local Target):**
@@ -239,9 +240,7 @@ All 125 unit, integration, and intelligence security tests execute in under 1.0 
 1. **JWT Library Migration:**
    * The current pure-standard-library implementation (`hmac`, `hashlib`, `json`, `base64`) provides a lightweight, zero-dependency, auditable RFC 7519 HMAC-SHA256 implementation suitable for the initial prototype.
    * For production, especially when adopting asymmetric signing (RS256/EdDSA) or integrating external OIDC identity providers, migrate to a dedicated, actively maintained library like `PyJWT` backed by `cryptography`.
-2. **Granular Caregiver Delegation:**
-   * Implement a `CaregiverResidentMapping` relationship table allowing household administrators to delegate access to specific caregivers or family viewers on a per-resident basis.
-3. **Hardware Keystore:**
+2. **Hardware Keystore:**
    * Store `DEVICE_API_KEY` in the host's secure enclave / keychain rather than plaintext environment files on hardware deployments.
 
 ---

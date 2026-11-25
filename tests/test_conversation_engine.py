@@ -387,7 +387,7 @@ def test_api_chat_turn_family_viewer_read_only_blocked(client: TestClient):
 
 
 def test_api_chat_turn_caregiver_authorized(client: TestClient):
-    """Verify Caregiver can execute chat on behalf of a resident."""
+    """Verify Caregiver can execute chat on behalf of an assigned resident, but unassigned caregiver is blocked."""
     resident = client.post("/api/v1/users", json={"username": "sarah_resident", "full_name": "Sarah Resident"}).json()
     caregiver = client.post(
         "/api/v1/users",
@@ -397,6 +397,23 @@ def test_api_chat_turn_caregiver_authorized(client: TestClient):
 
     headers_caregiver = make_auth_headers(user_id=caregiver["id"], username="carol_caregiver", role="caregiver")
 
+    # 1. Unassigned caregiver chat attempt -> 403 Forbidden
+    res_unassigned = client.post(
+        f"/api/v1/conversations/users/{resident['id']}/chat",
+        json={"utterance": "Caregiver checking resident dialogue"},
+        headers=headers_caregiver,
+    )
+    assert res_unassigned.status_code == 403
+    assert "not assigned" in res_unassigned.json()["detail"]
+
+    # 2. Assign caregiver to resident
+    assign_res = client.post(
+        f"/api/v1/users/{resident['id']}/caregivers/{caregiver['id']}",
+        headers={"X-Device-Key": TEST_DEVICE_KEY},
+    )
+    assert assign_res.status_code == 200
+
+    # 3. Assigned caregiver chat attempt -> 200 OK
     res = client.post(
         f"/api/v1/conversations/users/{resident['id']}/chat",
         json={"utterance": "Caregiver checking resident dialogue"},

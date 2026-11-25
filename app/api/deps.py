@@ -14,6 +14,7 @@ from app.core.security import (
 )
 from app.database.models.user import User, UserRole
 from app.database.session import get_db
+from app.users.service import UserService
 
 # Bearer token extractor (auto_error=False allows custom structured error reporting)
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -89,23 +90,40 @@ def get_optional_current_user(
 def verify_user_access(
     target_user_id: int,
     current_user: User,
+    db: Session,
 ) -> None:
     """Validate that the authenticated caller has authorization to access target_user_id's data.
 
-    Access Rules & Documented Architectural Boundaries:
-    1. A user can always access their own profile and conversation data (`current_user.id == target_user_id`).
-    2. A CAREGIVER possesses system-wide oversight to manage and inspect resident profiles.
-       LIMITATION NOTE: Explicit fine-grained caregiver-to-resident assignment (e.g. CaregiverResidentMapping)
-       is not yet implemented in Phase 3. Any user assigned the CAREGIVER role can currently access
-       all resident records in the household system. Fine-grained delegation is planned for production.
-    3. FAMILY_VIEWER accounts have read-only access (mutations are blocked on write endpoints).
-    4. All other cross-user access attempts (e.g. Resident A accessing Resident B) are rejected with 403 Forbidden.
+    SECURITY INVARIANTS:
+    1. A user can always access their own permitted resources (`current_user.id == target_user_id`).
+    2. If target_user_id does not exist in the system, return 404 Not Found.
+    3. A CAREGIVER can access a resident's resources ONLY if an explicit CaregiverResidentAssignment
+       exists in the database linking this caregiver to target_user_id. Ambient caregiver authority
+       across unassigned residents is strictly forbidden.
+    4. Unassigned caregivers attempting to access another resident's data receive HTTP 403 Forbidden.
+    5. Residents cannot access other residents' data (HTTP 403 Forbidden).
+    6. FAMILY_VIEWER accounts have read-only access to their own permitted resources and cannot access
+       other users' data without explicit authorization.
     """
     if current_user.id == target_user_id:
         return
 
+    target_user = db.get(User, target_user_id)
+    if target_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {target_user_id} not found",
+        )
+
     if current_user.role == UserRole.CAREGIVER:
-        return
+        if UserService.is_caregiver_assigned_to_resident(
+            db, caregiver_id=current_user.id, resident_id=target_user_id
+        ):
+            return
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: Caregiver {current_user.id} is not assigned to resident {target_user_id}. Explicit caregiver-to-resident assignment is required.",
+        )
 
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,

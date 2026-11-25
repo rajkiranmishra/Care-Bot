@@ -41,7 +41,7 @@ def create_session(
     db: Session = Depends(get_db),
 ) -> SessionResponse:
     """Initialize a new persistent multi-turn conversation session."""
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
 
     if current_user.role == UserRole.FAMILY_VIEWER:
         raise HTTPException(
@@ -69,7 +69,7 @@ def list_user_sessions(
     db: Session = Depends(get_db),
 ) -> List[SessionResponse]:
     """Retrieve conversation sessions belonging to the user with ownership verification."""
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
     sessions = ConversationService.list_sessions(db, user_id, status=status_filter, limit=limit)
     return [SessionResponse.model_validate(s) for s in sessions]
 
@@ -86,7 +86,7 @@ def get_user_session(
     db: Session = Depends(get_db),
 ) -> SessionResponse:
     """Fetch session details, enforcing user data isolation and ownership."""
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
     try:
         session = ConversationService.get_session(db, user_id, session_id)
         return SessionResponse.model_validate(session)
@@ -109,7 +109,7 @@ def update_user_session(
     db: Session = Depends(get_db),
 ) -> SessionResponse:
     """Update conversation state or metadata for an active session."""
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
 
     if current_user.role == UserRole.FAMILY_VIEWER:
         raise HTTPException(
@@ -144,7 +144,7 @@ def post_message(
     SECURITY RULE: Clients are strictly prohibited from impersonating 'assistant' or 'system' roles.
     Only role='user' is permitted from external API clients.
     """
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
 
     if current_user.role == UserRole.FAMILY_VIEWER:
         raise HTTPException(
@@ -180,7 +180,7 @@ def get_session_messages(
     db: Session = Depends(get_db),
 ) -> List[MessageResponse]:
     """Retrieve chronological dialogue history for a session with ownership checks."""
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
     try:
         messages = ConversationService.get_messages(db, user_id, session_id, limit=limit)
         return [MessageResponse.model_validate(m) for m in messages]
@@ -202,7 +202,7 @@ def get_user_llm_context(
     db: Session = Depends(get_db),
 ) -> UserContextPayload:
     """Compile structured context for local LLMs, enforcing user ownership."""
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
     try:
         return ContextEngine.get_user_context(db, user_id, history_window=history_window)
     except UserNotFoundError as exc:
@@ -228,7 +228,7 @@ async def chat_turn(
     3. Family Viewers have read-only privileges and cannot execute chat turns (which mutate dialogue state).
     4. Deterministic emergency detection executes before any local LLM generation.
     """
-    verify_user_access(user_id, current_user)
+    verify_user_access(user_id, current_user, db)
 
     if current_user.role == UserRole.FAMILY_VIEWER:
         raise HTTPException(
@@ -270,6 +270,8 @@ def resolve_resident_emergency(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only authorized caregivers can resolve emergencies",
         )
+
+    verify_user_access(user_id, current_user, db)
 
     try:
         UserService.get_by_id(db, user_id)
