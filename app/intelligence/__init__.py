@@ -10,6 +10,7 @@ from app.intelligence.llm_client import (
     LocalLLMClient,
     MockLLMClient,
 )
+from app.intelligence.ollama_client import OllamaLLMClient
 from app.intelligence.parser import ResponseParser
 from app.intelligence.permissions import ActionPermissionDeniedError, PermissionChecker
 from app.intelligence.prompt_builder import PromptBuilder
@@ -34,6 +35,7 @@ __all__ = [
     "ChatTurnResponse",
     "LocalLLMClient",
     "MockLLMClient",
+    "OllamaLLMClient",
     "LLMClientError",
     "LLMTimeoutError",
     "LLMConnectionError",

@@ -2,7 +2,7 @@
 
 import hmac
 from typing import Generator, List, Optional
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,9 @@ from app.core.security import (
 )
 from app.database.models.user import User, UserRole
 from app.database.session import get_db
+from app.intelligence.engine import ConversationEngine
+from app.intelligence.llm_client import LocalLLMClient, MockLLMClient
+from app.intelligence.ollama_client import OllamaLLMClient
 from app.users.service import UserService
 
 # Bearer token extractor (auto_error=False allows custom structured error reporting)
@@ -169,3 +172,58 @@ def verify_device_auth(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Unauthorized hardware or client: Valid X-Device-Key or user bearer token required",
     )
+
+
+class LLMLifecycleError(RuntimeError):
+    """Raised when an unmanaged LLM client lifecycle is detected in dependency injection."""
+    pass
+
+
+def get_llm_client(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> LocalLLMClient:
+    """Dependency provider yielding the configured LocalLLMClient implementation.
+
+    LIFECYCLE MANAGEMENT:
+    When running under the FastAPI application lifecycle with LOCAL_LLM_PROVIDER='ollama',
+    this reuses the persistent OllamaLLMClient stored on app.state.llm_client to preserve
+    connection pooling and prevent creating new HTTP clients on every incoming request.
+
+    If application lifespan initialization was bypassed or failed, lazily initializes
+    and attaches a single managed client to app.state.llm_client so that subsequent requests
+    reuse the same instance rather than leaking unmanaged HTTP clients.
+
+    If called without a valid application request context (e.g. request is None or has no
+    app.state), raises LLMLifecycleError to prevent unmanaged, leaking HTTP client creation.
+
+    TESTING ISOLATION:
+    Defaults to MockLLMClient for offline, deterministic test suite execution without
+    requiring a physical GPU or active local Ollama daemon.
+    """
+    if settings.LOCAL_LLM_PROVIDER.lower() == "ollama":
+        if request and hasattr(request, "app") and hasattr(request.app, "state"):
+            client = getattr(request.app.state, "llm_client", None)
+            if client is None:
+                client = OllamaLLMClient(
+                    base_url=settings.OLLAMA_BASE_URL,
+                    model_name=settings.LOCAL_LLM_MODEL,
+                    timeout_seconds=settings.LLM_TIMEOUT_SECONDS,
+                    temperature=settings.LLM_TEMPERATURE,
+                )
+                request.app.state.llm_client = client
+            return client
+        raise LLMLifecycleError(
+            "Cannot instantiate unmanaged OllamaLLMClient: request or request.app.state is missing. "
+            "Ollama clients must have their lifecycle managed via FastAPI application lifespan or "
+            "be provided via dependency override."
+        )
+    return MockLLMClient()
+
+
+def get_conversation_engine(
+    llm_client: LocalLLMClient = Depends(get_llm_client),
+) -> ConversationEngine:
+    """Dependency provider for ConversationEngine with injected LocalLLMClient."""
+    return ConversationEngine(llm_client=llm_client)
+

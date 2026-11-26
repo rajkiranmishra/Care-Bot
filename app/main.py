@@ -35,9 +35,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception as exc:
         logger.error("Failed to establish database connection during startup: %s", exc)
 
+    # Initialize Local LLM Client if configured for Ollama
+    app.state.llm_client = None
+    if settings.LOCAL_LLM_PROVIDER.lower() == "ollama":
+        try:
+            from app.intelligence.ollama_client import OllamaLLMClient
+            app.state.llm_client = OllamaLLMClient(
+                base_url=settings.OLLAMA_BASE_URL,
+                model_name=settings.LOCAL_LLM_MODEL,
+                timeout_seconds=settings.LLM_TIMEOUT_SECONDS,
+                temperature=settings.LLM_TEMPERATURE,
+            )
+            logger.info(
+                "Initialized persistent OllamaLLMClient [model: %s, url: %s]",
+                settings.LOCAL_LLM_MODEL,
+                settings.OLLAMA_BASE_URL,
+            )
+        except Exception as exc:
+            logger.warning("Could not initialize OllamaLLMClient during startup: %s", exc)
+
     yield
 
     logger.info("Shutting down CARE-BOT backend cleanly")
+    if hasattr(app.state, "llm_client") and app.state.llm_client is not None:
+        try:
+            await app.state.llm_client.aclose()
+        except Exception as exc:
+            logger.warning("Error closing OllamaLLMClient during shutdown: %s", exc)
+        finally:
+            app.state.llm_client = None
+
     engine.dispose()
 
 

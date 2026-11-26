@@ -4,7 +4,12 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_db, verify_user_access
+from app.api.deps import (
+    get_conversation_engine,
+    get_current_user,
+    get_db,
+    verify_user_access,
+)
 from app.conversation.schemas import (
     MessageCreate,
     MessageResponse,
@@ -219,6 +224,7 @@ async def chat_turn(
     request: ChatTurnRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    engine: ConversationEngine = Depends(get_conversation_engine),
 ) -> ChatTurnResponse:
     """Execute a conversational interaction turn through the ConversationEngine.
 
@@ -241,7 +247,6 @@ async def chat_turn(
     except UserNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
 
-    engine = ConversationEngine()
     try:
         return await engine.process_turn(db, target_user, request)
     except SessionNotFoundError as exc:
