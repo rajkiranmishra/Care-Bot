@@ -225,13 +225,22 @@ class OllamaLLMClient:
                         self._introspected_context_window = val
                         break
 
-                self._is_introspected = True
-                logger.info(
-                    "Introspected metadata for model '%s': context_window=%s, quantization=%s",
-                    self.model_name,
-                    self._introspected_context_window,
-                    self._introspected_quantization,
+                has_meaningful_metadata = bool(
+                    self._introspected_quantization or self._introspected_context_window
                 )
+                if has_meaningful_metadata:
+                    self._is_introspected = True
+                    logger.info(
+                        "Introspected metadata for model '%s': context_window=%s, quantization=%s",
+                        self.model_name,
+                        self._introspected_context_window,
+                        self._introspected_quantization,
+                    )
+                else:
+                    logger.warning(
+                        "Ollama /api/show returned HTTP 200 for model '%s' but response lacked quantization or context_length; introspection remaining incomplete for retry.",
+                        self.model_name,
+                    )
         except Exception as exc:
             logger.debug("Failed to introspect model metadata from /api/show: %s", exc)
 

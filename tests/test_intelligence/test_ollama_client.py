@@ -1,14 +1,18 @@
 """Unit and mock integration tests for OllamaLLMClient and Dependency Injection."""
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_conversation_engine, get_llm_client
+from app.api.deps import (
+    LLMLifecycleError,
+    get_conversation_engine,
+    get_llm_client,
+)
 from app.config import Settings
 from app.database.models import User
 from app.intelligence.engine import ConversationEngine
@@ -44,6 +48,8 @@ def make_ollama_mock_transport(
     simulate_connection_error: bool = False,
     malformed_json: bool = False,
     missing_content: bool = False,
+    show_response_payload: Optional[dict] = None,
+    show_responses: Optional[List[dict]] = None,
     recorded_requests: list = None,
 ):
     """Factory creating an httpx.MockTransport for Ollama API endpoints."""
@@ -61,6 +67,7 @@ def make_ollama_mock_transport(
                 "url": str(request.url),
                 "headers": dict(request.headers),
                 "body": body,
+                "timeout": request.extensions.get("timeout"),
             })
 
         if simulate_connection_error:
@@ -76,6 +83,10 @@ def make_ollama_mock_transport(
 
         if request.url.path == "/api/show":
             if status_code == 200:
+                if show_responses is not None and len(show_responses) > 0:
+                    return httpx.Response(200, json=show_responses.pop(0))
+                if show_response_payload is not None:
+                    return httpx.Response(200, json=show_response_payload)
                 return httpx.Response(200, json={
                     "details": {
                         "parameter_size": "7.6B",
@@ -179,6 +190,38 @@ async def test_ollama_client_generate_success():
         assert body["messages"][0]["content"] == "You are a compassionate elderly care assistant."
         assert body["messages"][1]["role"] == "user"
         assert body["messages"][1]["content"] == "Resident: Good morning"
+
+
+@pytest.mark.anyio
+async def test_ollama_http_timeout_passed_to_request():
+    """Verify the actual HTTP request timeout captures configured and overridden values."""
+    recorded = []
+    transport = make_ollama_mock_transport(recorded_requests=recorded)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:11434") as http_client:
+        client = OllamaLLMClient(
+            model_name="qwen2.5:7b",
+            timeout_seconds=25.0,
+            http_client=http_client,
+        )
+
+        # Call generate without timeout override -> must capture configured 25.0
+        await client.generate("Prompt 1")
+        assert len(recorded) == 1
+        timeout_ext1 = recorded[0]["timeout"]
+        assert timeout_ext1 is not None
+        assert timeout_ext1["read"] == 25.0
+        assert timeout_ext1["write"] == 25.0
+        assert timeout_ext1["connect"] == 5.0
+
+        # Call generate with explicit per-call timeout override -> must capture 3.5
+        await client.generate("Prompt 2", timeout_seconds=3.5)
+        assert len(recorded) == 2
+        timeout_ext2 = recorded[1]["timeout"]
+        assert timeout_ext2 is not None
+        assert timeout_ext2["read"] == 3.5
+        assert timeout_ext2["write"] == 3.5
+        assert timeout_ext2["connect"] == 3.5  # min(5.0, 3.5)
 
 
 @pytest.mark.anyio
@@ -352,6 +395,41 @@ async def test_ollama_client_metadata_introspected_from_api_show():
 
 
 @pytest.mark.anyio
+async def test_ollama_metadata_incomplete_response_preserves_fallback_and_retries():
+    """Verify incomplete /api/show response does not mark introspection complete and permits retry."""
+    # First response: 200 OK but lacks quantization and context_length
+    incomplete_payload = {"details": {}, "model_info": {}}
+    # Second response (for retry): complete details
+    complete_payload = {
+        "details": {"quantization_level": "Q4_K_M"},
+        "model_info": {"qwen2.context_length": 32768},
+    }
+
+    transport = make_ollama_mock_transport(
+        show_responses=[incomplete_payload, complete_payload]
+    )
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:11434") as http_client:
+        client = OllamaLLMClient(model_name="qwen2.5:7b", http_client=http_client)
+
+        # 1. First fetch attempt receives incomplete response
+        meta1 = await client.fetch_model_metadata()
+        # Must NOT mark introspection complete
+        assert client._is_introspected is False
+        assert meta1.quantization == "unknown"
+        assert meta1.context_window == 2048
+
+        # 2. Subsequent health check triggers retry because _is_introspected is False
+        is_healthy = await client.health_check()
+        assert is_healthy is True
+        # Retry succeeded: now marked complete with introspected values
+        assert client._is_introspected is True
+        meta2 = client.get_model_info()
+        assert meta2.quantization == "Q4_K_M"
+        assert meta2.context_window == 32768
+
+
+@pytest.mark.anyio
 async def test_ollama_client_health_check_triggers_introspection():
     """Verify health_check returns True and automatically triggers metadata introspection."""
     live_transport = make_ollama_mock_transport(status_code=200)
@@ -508,12 +586,12 @@ def test_settings_llm_provider_configuration():
 
 def test_dependency_injection_provider_selection():
     """Verify get_llm_client instantiates correct client based on Settings."""
-    # Case A: Provider = mock
+    # Case A: Provider = mock (works even when request is None)
     mock_settings = Settings(LOCAL_LLM_PROVIDER="mock")
     client_a = get_llm_client(request=None, settings=mock_settings)
     assert isinstance(client_a, MockLLMClient)
 
-    # Case B: Provider = ollama without request (e.g. CLI script)
+    # Case B: Provider = ollama with valid request.app.state context
     ollama_settings = Settings(
         LOCAL_LLM_PROVIDER="ollama",
         LOCAL_LLM_MODEL="qwen2.5:3b",
@@ -521,11 +599,30 @@ def test_dependency_injection_provider_selection():
         LLM_TIMEOUT_SECONDS=14.0,
         LLM_TEMPERATURE=0.35,
     )
-    client_b = get_llm_client(request=None, settings=ollama_settings)
+    mock_request = MagicMock()
+    mock_request.app.state.llm_client = None
+
+    client_b = get_llm_client(request=mock_request, settings=ollama_settings)
     assert isinstance(client_b, OllamaLLMClient)
     assert client_b.model_name == "qwen2.5:3b"
     assert client_b.timeout_seconds == 14.0
     assert client_b.temperature == 0.35
+
+
+def test_dependency_injection_unmanaged_fallback_raises_lifecycle_error():
+    """Verify calling get_llm_client for Ollama without a valid request/state context raises LLMLifecycleError."""
+    ollama_settings = Settings(
+        LOCAL_LLM_PROVIDER="ollama",
+        LOCAL_LLM_MODEL="qwen2.5:7b",
+    )
+    # When request is None
+    with pytest.raises(LLMLifecycleError, match="unmanaged OllamaLLMClient"):
+        get_llm_client(request=None, settings=ollama_settings)
+
+    # When request has no app or state
+    mock_req_no_state = MagicMock(spec=[])
+    with pytest.raises(LLMLifecycleError, match="unmanaged OllamaLLMClient"):
+        get_llm_client(request=mock_req_no_state, settings=ollama_settings)
 
 
 def test_dependency_injection_avoids_unmanaged_client_per_request():

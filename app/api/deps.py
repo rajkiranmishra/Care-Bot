@@ -174,6 +174,11 @@ def verify_device_auth(
     )
 
 
+class LLMLifecycleError(RuntimeError):
+    """Raised when an unmanaged LLM client lifecycle is detected in dependency injection."""
+    pass
+
+
 def get_llm_client(
     request: Request,
     settings: Settings = Depends(get_settings),
@@ -188,6 +193,9 @@ def get_llm_client(
     If application lifespan initialization was bypassed or failed, lazily initializes
     and attaches a single managed client to app.state.llm_client so that subsequent requests
     reuse the same instance rather than leaking unmanaged HTTP clients.
+
+    If called without a valid application request context (e.g. request is None or has no
+    app.state), raises LLMLifecycleError to prevent unmanaged, leaking HTTP client creation.
 
     TESTING ISOLATION:
     Defaults to MockLLMClient for offline, deterministic test suite execution without
@@ -205,11 +213,10 @@ def get_llm_client(
                 )
                 request.app.state.llm_client = client
             return client
-        return OllamaLLMClient(
-            base_url=settings.OLLAMA_BASE_URL,
-            model_name=settings.LOCAL_LLM_MODEL,
-            timeout_seconds=settings.LLM_TIMEOUT_SECONDS,
-            temperature=settings.LLM_TEMPERATURE,
+        raise LLMLifecycleError(
+            "Cannot instantiate unmanaged OllamaLLMClient: request or request.app.state is missing. "
+            "Ollama clients must have their lifecycle managed via FastAPI application lifespan or "
+            "be provided via dependency override."
         )
     return MockLLMClient()
 
