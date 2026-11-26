@@ -63,9 +63,30 @@ class Settings(BaseSettings):
     # API Configuration
     API_V1_STR: str = "/api/v1"
 
-    # Future AI Settings (Placeholders for upcoming phases)
-    OLLAMA_BASE_URL: str = "http://localhost:11434"
-    LOCAL_LLM_MODEL: str = "qwen2.5:3b"
+    # Local AI & LLM Engine Settings
+    LOCAL_LLM_PROVIDER: str = Field(
+        default="mock",
+        description="Local LLM inference provider: 'mock' for tests/offline, 'ollama' for real local inference",
+    )
+    OLLAMA_BASE_URL: str = Field(
+        default="http://localhost:11434",
+        description="Base URL for local Ollama daemon HTTP API",
+    )
+    LOCAL_LLM_MODEL: str = Field(
+        default="qwen2.5:7b",
+        description="Model name/tag (e.g. qwen2.5:7b for primary development, qwen2.5:3b for lightweight alternative)",
+    )
+    LLM_TIMEOUT_SECONDS: float = Field(
+        default=12.0,
+        ge=1.0,
+        description="Timeout in seconds for local LLM inference requests",
+    )
+    LLM_TEMPERATURE: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature for local LLM inference",
+    )
 
     @property
     def cors_origins_list(self) -> List[str]:
@@ -80,6 +101,12 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_security_configuration(self) -> "Settings":
         """Enforce strict secret requirements in production and prevent insecure defaults."""
+        # Validate LLM Provider
+        provider = self.LOCAL_LLM_PROVIDER.lower().strip()
+        if provider not in ("mock", "ollama"):
+            raise ValueError(f"LOCAL_LLM_PROVIDER must be 'mock' or 'ollama', got '{self.LOCAL_LLM_PROVIDER}'")
+        self.LOCAL_LLM_PROVIDER = provider
+
         is_prod = self.ENVIRONMENT.lower() == "production"
         if is_prod:
             if (
