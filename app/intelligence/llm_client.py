@@ -35,9 +35,9 @@ class LocalLLMClient(Protocol):
         prompt: str,
         system_prompt: Optional[str] = None,
         json_mode: bool = True,
-        temperature: float = 0.2,
-        max_tokens: int = 512,
-        timeout_seconds: float = 10.0,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        timeout_seconds: Optional[float] = None,
     ) -> LLMResponse:
         """Execute text generation or structured JSON completion against the local model."""
         ...
@@ -162,18 +162,22 @@ class MockLLMClient:
         prompt: str,
         system_prompt: Optional[str] = None,
         json_mode: bool = True,
-        temperature: float = 0.2,
-        max_tokens: int = 512,
-        timeout_seconds: float = 10.0,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        timeout_seconds: Optional[float] = None,
     ) -> LLMResponse:
         """Simulate generation with call recording and configurable error modes."""
+        eff_temperature = 0.2 if temperature is None else temperature
+        eff_max_tokens = 512 if max_tokens is None else max_tokens
+        eff_timeout = 10.0 if timeout_seconds is None else timeout_seconds
+
         call_record = {
             "prompt": prompt,
             "system_prompt": system_prompt,
             "json_mode": json_mode,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "timeout_seconds": timeout_seconds,
+            "temperature": eff_temperature,
+            "max_tokens": eff_max_tokens,
+            "timeout_seconds": eff_timeout,
         }
         self.calls.append(call_record)
 
@@ -183,7 +187,7 @@ class MockLLMClient:
         if self.simulate_timeout:
             # Yield control briefly then raise timeout
             await asyncio.sleep(0.01)
-            raise LLMTimeoutError(f"Inference timed out after {timeout_seconds} seconds")
+            raise LLMTimeoutError(f"Inference timed out after {eff_timeout} seconds")
 
         # Simulate minimal non-blocking asynchronous processing latency
         await asyncio.sleep(0.001)

@@ -2,6 +2,7 @@
 
 import json
 from typing import Any, Dict
+from unittest.mock import MagicMock
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -73,9 +74,25 @@ def make_ollama_mock_transport(
                 return httpx.Response(200, json={"version": "0.40.18"})
             return httpx.Response(status_code, text="Error")
 
+        if request.url.path == "/api/show":
+            if status_code == 200:
+                return httpx.Response(200, json={
+                    "details": {
+                        "parameter_size": "7.6B",
+                        "quantization_level": "Q4_K_M",
+                        "format": "gguf",
+                        "family": "qwen2",
+                    },
+                    "model_info": {
+                        "general.architecture": "qwen2",
+                        "qwen2.context_length": 32768,
+                    },
+                })
+            return httpx.Response(status_code, text="Error")
+
         if request.url.path == "/api/chat":
             if status_code != 200:
-                return httpx.Response(status_code, text=f"Error {status_code}")
+                return httpx.Response(status_code, text=f"Error {status_code}: internal daemon detail")
 
             if malformed_json:
                 return httpx.Response(200, text="<!DOCTYPE html><html>Gateway Error</html>")
@@ -127,6 +144,8 @@ async def test_ollama_client_generate_success():
         client = OllamaLLMClient(
             base_url="http://localhost:11434",
             model_name="qwen2.5:7b",
+            temperature=0.25,
+            timeout_seconds=8.0,
             http_client=http_client,
         )
 
@@ -134,9 +153,6 @@ async def test_ollama_client_generate_success():
             prompt="Resident: Good morning",
             system_prompt="You are a compassionate elderly care assistant.",
             json_mode=True,
-            temperature=0.3,
-            max_tokens=256,
-            timeout_seconds=5.0,
         )
 
         assert response.content == expected_json
@@ -147,7 +163,7 @@ async def test_ollama_client_generate_success():
         assert response.metadata["model"] == "qwen2.5:7b"
         assert response.metadata["done"] is True
 
-        # Verify outgoing HTTP payload
+        # Verify outgoing HTTP payload used configured temperature
         assert len(recorded) == 1
         req = recorded[0]
         assert req["method"] == "POST"
@@ -156,13 +172,45 @@ async def test_ollama_client_generate_success():
         assert body["model"] == "qwen2.5:7b"
         assert body["format"] == "json"
         assert body["stream"] is False
-        assert body["options"]["temperature"] == 0.3
-        assert body["options"]["num_predict"] == 256
+        assert body["options"]["temperature"] == 0.25
+        assert body["options"]["num_predict"] == 512
         assert len(body["messages"]) == 2
         assert body["messages"][0]["role"] == "system"
         assert body["messages"][0]["content"] == "You are a compassionate elderly care assistant."
         assert body["messages"][1]["role"] == "user"
         assert body["messages"][1]["content"] == "Resident: Good morning"
+
+
+@pytest.mark.anyio
+async def test_ollama_runtime_config_temperature_and_timeout_precedence():
+    """Verify configured LLM_TEMPERATURE and LLM_TIMEOUT_SECONDS reach the HTTP payload and timeout."""
+    recorded = []
+    transport = make_ollama_mock_transport(recorded_requests=recorded)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:11434") as http_client:
+        # Client initialized with non-default configured values (e.g. from Settings)
+        client = OllamaLLMClient(
+            model_name="qwen2.5:7b",
+            temperature=0.85,
+            timeout_seconds=25.0,
+            max_tokens=1024,
+            http_client=http_client,
+        )
+
+        # Call generate without explicit temperature or timeout -> should use client's configured values
+        await client.generate(prompt="What is the schedule?")
+
+        assert len(recorded) == 1
+        body = recorded[0]["body"]
+        assert body["options"]["temperature"] == 0.85
+        assert body["options"]["num_predict"] == 1024
+
+        # Next call with explicit overrides -> should respect call-specific overrides
+        await client.generate(prompt="Quick query", temperature=0.05, max_tokens=64)
+        assert len(recorded) == 2
+        body2 = recorded[1]["body"]
+        assert body2["options"]["temperature"] == 0.05
+        assert body2["options"]["num_predict"] == 64
 
 
 @pytest.mark.anyio
@@ -194,23 +242,23 @@ async def test_ollama_client_generate_without_system_prompt_and_no_json_mode():
 
 @pytest.mark.anyio
 async def test_ollama_client_timeout_handling():
-    """Verify HTTP timeout raises LLMTimeoutError (subclass of LLMClientError)."""
+    """Verify HTTP timeout raises LLMTimeoutError with configured duration."""
     transport = make_ollama_mock_transport(simulate_timeout=True)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost:11434") as http_client:
-        client = OllamaLLMClient(http_client=http_client)
-        with pytest.raises(LLMTimeoutError, match="timed out"):
-            await client.generate("User query", timeout_seconds=1.5)
+        client = OllamaLLMClient(timeout_seconds=7.5, http_client=http_client)
+        with pytest.raises(LLMTimeoutError, match="timed out after 7.5 seconds"):
+            await client.generate("User query")
 
 
 @pytest.mark.anyio
 async def test_ollama_client_connection_error_handling():
-    """Verify daemon connection refusal raises LLMConnectionError (subclass of LLMClientError)."""
+    """Verify daemon connection refusal raises LLMConnectionError without leaking sensitive data."""
     transport = make_ollama_mock_transport(simulate_connection_error=True)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost:11434") as http_client:
         client = OllamaLLMClient(http_client=http_client)
-        with pytest.raises(LLMConnectionError, match="Failed to connect to Ollama server"):
+        with pytest.raises(LLMConnectionError, match="connection refused"):
             await client.generate("User query")
 
 
@@ -221,19 +269,22 @@ async def test_ollama_client_http_404_model_not_found():
 
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost:11434") as http_client:
         client = OllamaLLMClient(model_name="custom-missing-model", http_client=http_client)
-        with pytest.raises(LLMClientError, match="custom-missing-model.*not found.*ollama pull"):
+        with pytest.raises(LLMClientError, match="custom-missing-model.*not found on server.*ollama pull"):
             await client.generate("User query")
 
 
 @pytest.mark.anyio
-async def test_ollama_client_http_500_failure():
-    """Verify HTTP 500 error raises LLMClientError without crashing."""
+async def test_ollama_client_http_500_failure_sanitizes_body():
+    """Verify HTTP 500 error raises LLMClientError without leaking raw server bodies."""
     transport = make_ollama_mock_transport(status_code=500)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://localhost:11434") as http_client:
         client = OllamaLLMClient(http_client=http_client)
-        with pytest.raises(LLMClientError, match="HTTP 500"):
+        with pytest.raises(LLMClientError) as exc_info:
             await client.generate("User query")
+        # Confirms HTTP status is reported, but raw body ("internal daemon detail") is not leaked
+        assert "HTTP 500" in str(exc_info.value)
+        assert "internal daemon detail" not in str(exc_info.value)
 
 
 @pytest.mark.anyio
@@ -258,35 +309,67 @@ async def test_ollama_client_missing_message_content():
             await client.generate("User query")
 
 
+# -----------------------------------------------------------------------------
+# Model Metadata & Health Check Tests
+# -----------------------------------------------------------------------------
+
+def test_ollama_client_metadata_unknown_when_not_introspected():
+    """Verify uninspected model reports context_window fallback and 'unknown' quantization."""
+    client = OllamaLLMClient(model_name="qwen2.5:7b")
+    info = client.get_model_info()
+    assert isinstance(info, ModelMetadata)
+    assert info.model_name == "qwen2.5:7b"
+    assert info.provider == "ollama"
+    assert info.context_window == 2048  # Safe default fallback
+    assert info.quantization == "unknown"  # Not hardcoded!
+
+
+def test_ollama_client_metadata_configured_explicitly():
+    """Verify explicitly configured context window and quantization are respected."""
+    client = OllamaLLMClient(
+        model_name="custom-model",
+        context_window=8192,
+        quantization="Q8_0",
+    )
+    info = client.get_model_info()
+    assert info.model_name == "custom-model"
+    assert info.context_window == 8192
+    assert info.quantization == "Q8_0"
+
+
 @pytest.mark.anyio
-async def test_ollama_client_health_check_live_and_down():
-    """Verify health_check returns True on HTTP 200 and False on failure."""
-    # Live daemon
+async def test_ollama_client_metadata_introspected_from_api_show():
+    """Verify fetch_model_metadata accurately retrieves details from Ollama /api/show."""
+    transport = make_ollama_mock_transport()
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:11434") as http_client:
+        client = OllamaLLMClient(model_name="qwen2.5:7b", http_client=http_client)
+        assert client.get_model_info().quantization == "unknown"
+
+        meta = await client.fetch_model_metadata()
+        assert meta.quantization == "Q4_K_M"
+        assert meta.context_window == 32768
+        assert client._is_introspected is True
+
+
+@pytest.mark.anyio
+async def test_ollama_client_health_check_triggers_introspection():
+    """Verify health_check returns True and automatically triggers metadata introspection."""
     live_transport = make_ollama_mock_transport(status_code=200)
     async with httpx.AsyncClient(transport=live_transport, base_url="http://localhost:11434") as http_client:
-        client = OllamaLLMClient(http_client=http_client)
-        assert await client.health_check() is True
+        client = OllamaLLMClient(model_name="qwen2.5:7b", http_client=http_client)
+        assert client.get_model_info().quantization == "unknown"
+
+        is_healthy = await client.health_check()
+        assert is_healthy is True
+        # After health check, metadata should be populated
+        assert client.get_model_info().quantization == "Q4_K_M"
+        assert client.get_model_info().context_window == 32768
 
     # Offline daemon
     down_transport = make_ollama_mock_transport(simulate_connection_error=True)
     async with httpx.AsyncClient(transport=down_transport, base_url="http://localhost:11434") as http_client:
         client_down = OllamaLLMClient(http_client=http_client)
         assert await client_down.health_check() is False
-
-
-def test_ollama_client_model_metadata():
-    """Verify get_model_info returns expected ModelMetadata attributes."""
-    client = OllamaLLMClient(
-        model_name="qwen2.5:7b",
-        context_window=32768,
-        quantization="Q4_K_M",
-    )
-    info = client.get_model_info()
-    assert isinstance(info, ModelMetadata)
-    assert info.model_name == "qwen2.5:7b"
-    assert info.provider == "ollama"
-    assert info.context_window == 32768
-    assert info.quantization == "Q4_K_M"
 
 
 @pytest.mark.anyio
@@ -430,15 +513,40 @@ def test_dependency_injection_provider_selection():
     client_a = get_llm_client(request=None, settings=mock_settings)
     assert isinstance(client_a, MockLLMClient)
 
-    # Case B: Provider = ollama
+    # Case B: Provider = ollama without request (e.g. CLI script)
     ollama_settings = Settings(
         LOCAL_LLM_PROVIDER="ollama",
         LOCAL_LLM_MODEL="qwen2.5:3b",
         OLLAMA_BASE_URL="http://localhost:11434",
+        LLM_TIMEOUT_SECONDS=14.0,
+        LLM_TEMPERATURE=0.35,
     )
     client_b = get_llm_client(request=None, settings=ollama_settings)
     assert isinstance(client_b, OllamaLLMClient)
     assert client_b.model_name == "qwen2.5:3b"
+    assert client_b.timeout_seconds == 14.0
+    assert client_b.temperature == 0.35
+
+
+def test_dependency_injection_avoids_unmanaged_client_per_request():
+    """Verify get_llm_client reuses managed instance on app.state rather than creating per request."""
+    ollama_settings = Settings(
+        LOCAL_LLM_PROVIDER="ollama",
+        LOCAL_LLM_MODEL="qwen2.5:7b",
+    )
+
+    # Simulate request with app.state
+    mock_request = MagicMock()
+    mock_request.app.state.llm_client = None
+
+    # First request: lazily initializes and attaches to app.state
+    client1 = get_llm_client(request=mock_request, settings=ollama_settings)
+    assert isinstance(client1, OllamaLLMClient)
+    assert mock_request.app.state.llm_client is client1
+
+    # Second request: reuses exact same instance from app.state
+    client2 = get_llm_client(request=mock_request, settings=ollama_settings)
+    assert client2 is client1
 
 
 def test_api_chat_turn_with_dependency_override(client: TestClient):

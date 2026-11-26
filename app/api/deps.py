@@ -185,13 +185,26 @@ def get_llm_client(
     this reuses the persistent OllamaLLMClient stored on app.state.llm_client to preserve
     connection pooling and prevent creating new HTTP clients on every incoming request.
 
+    If application lifespan initialization was bypassed or failed, lazily initializes
+    and attaches a single managed client to app.state.llm_client so that subsequent requests
+    reuse the same instance rather than leaking unmanaged HTTP clients.
+
     TESTING ISOLATION:
     Defaults to MockLLMClient for offline, deterministic test suite execution without
     requiring a physical GPU or active local Ollama daemon.
     """
     if settings.LOCAL_LLM_PROVIDER.lower() == "ollama":
-        if request and hasattr(request.app.state, "llm_client") and request.app.state.llm_client is not None:
-            return request.app.state.llm_client
+        if request and hasattr(request, "app") and hasattr(request.app, "state"):
+            client = getattr(request.app.state, "llm_client", None)
+            if client is None:
+                client = OllamaLLMClient(
+                    base_url=settings.OLLAMA_BASE_URL,
+                    model_name=settings.LOCAL_LLM_MODEL,
+                    timeout_seconds=settings.LLM_TIMEOUT_SECONDS,
+                    temperature=settings.LLM_TEMPERATURE,
+                )
+                request.app.state.llm_client = client
+            return client
         return OllamaLLMClient(
             base_url=settings.OLLAMA_BASE_URL,
             model_name=settings.LOCAL_LLM_MODEL,

@@ -62,6 +62,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await app.state.llm_client.aclose()
         except Exception as exc:
             logger.warning("Error closing OllamaLLMClient during shutdown: %s", exc)
+        finally:
+            app.state.llm_client = None
 
     engine.dispose()
 
